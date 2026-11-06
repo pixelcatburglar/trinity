@@ -186,7 +186,45 @@ async fn locations(ctx: &Ctx<'_>, ids: &[i32]) -> Value {
         }
         lines
     });
+    // What is only in space (rats, asteroids, cans, beacons, sites) has no
+    // row; the client still looks it up before warping to it (menusvc.py
+    // WarpToItem names it in "Warping to ..."), and fails without one.
+    let found: BTreeSet<i64> = lines.iter().filter_map(|l| match l { Value::List(c) => c.first().and_then(|v| v.as_i64()), _ => None }).collect();
+    let missing: Vec<i64> = ids.iter().map(|&id| i64::from(id)).filter(|id| *id != 0 && !found.contains(id)).collect();
+    let mut lines = lines;
+    if !missing.is_empty() {
+        let w = ctx.world.lock();
+        let here = ctx.session.solar_system_id.and_then(|s| w.parks.get(&s));
+        for id in missing {
+            let live = here.and_then(|p| live_location(p, id)).or_else(|| w.parks.values().find_map(|p| live_location(p, id)));
+            if let Some((name, at)) = live {
+                lines.push(Value::List(vec![Value::Int(id), Value::text(name), Value::Double(at.x), Value::Double(at.y), Value::Double(at.z)]));
+            }
+        }
+    }
     keyed(HEADER, lines)
+}
+
+/// The name and position of a transient object in `park`, by ID.
+fn live_location(park: &crate::ballpark::Park, id: i64) -> Option<(String, crate::ballpark::Vec3)> {
+    let type_name = |t: i64| sde::table("invTypes").get("typeID", t).and_then(|r| r.text("typeName").map(str::to_string)).unwrap_or_default();
+    let named = |name: &str, type_id: i64| if name.is_empty() { type_name(type_id) } else { name.to_string() };
+    if let Some(s) = park.ships.get(&id) {
+        return Some((type_name(s.pilot.type_id), s.pos));
+    }
+    if let Some(r) = park.rocks.get(&id) {
+        return Some((named(&r.name, r.type_id), r.pos));
+    }
+    if let Some(c) = park.cans.get(&id) {
+        return Some((named(&c.name, c.type_id), c.pos));
+    }
+    if let Some(b) = park.beacons.get(&id) {
+        return Some((named(&b.name, b.type_id), b.pos));
+    }
+    if let Some(s) = park.sites.get(&id) {
+        return Some((s.name.clone(), s.pos));
+    }
+    park.structures.get(&id).map(|s| (named(&s.name, s.type_id), s.pos))
 }
 
 const CORP_TICKER_COLUMNS: &[&str] = &["corporationID", "tickerName", "shape1", "shape2", "shape3", "color1", "color2", "color3"];

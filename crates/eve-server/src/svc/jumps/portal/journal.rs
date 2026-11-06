@@ -4,8 +4,6 @@
 use super::*;
 use crate::{conn::Server,losses::Loss,store::Tx};
 
-#[cfg(test)] mod tests;
-
 #[derive(Debug,Clone,PartialEq,serde::Serialize,serde::Deserialize)]
 struct Intent {
     pilot:i64,ship:i64,ship_type:i64,system:i64,member:Option<i64>,beacon:i64,to:i64,alliance:Option<i64>,

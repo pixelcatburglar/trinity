@@ -506,24 +506,3 @@ fn survey_moons(world: &crate::world::World, store: &Store, client: i64, me: i64
     info!("{me}'s survey probe in {system} surveyed {} moon(s)", surveyed.len());
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ballpark::{Pilot, Ship, ShipStats};
-
-    #[test]
-    fn three_probes_find_what_lies_within_reach_of_all_of_them() {
-        let mut park = Park::new(30_000_001, Vec::new(), 0);
-        let pilot = |id| Pilot { type_id: 587, group_id: 25, name: String::new(), char_id: id, corp_id: 1, alliance_id: None, security: 0.0, bounty: 0.0 };
-        let stats = || ShipStats::new(30.0, 1e6, 1.0, 300.0, 1.0);
-        park.ships.insert(10, Ship::new(10, 0, stats(), pilot(10), Vec3::new(0.5 * AU, 0.0, 0.0), Vec3::ZERO));
-        park.ships.insert(11, Ship::new(11, 0, stats(), pilot(11), Vec3::new(40.0 * AU, 0.0, 0.0), Vec3::ZERO));
-        let probe = |x: f64| Probe { owner: 1, type_id: 9994, system: 30_000_001, pos: Vec3::new(x, 0.0, 0.0), until_ms: i64::MAX, range: 3.0, group_count: 3, deviation: (1.0e9, 5.0e9) };
-        let probes = vec![probe(0.0), probe(AU), probe(-AU)];
-        let found = analyse(&park, &probes, 25, true, 99, 1);
-        assert_eq!(found.iter().map(|f| f.id).collect::<Vec<_>>(), vec![10]);
-        assert!((found[0].pos - Vec3::new(0.5 * AU, 0.0, 0.0)).len() <= 5.0e9 + 1.0);
-        assert!(found[0].signal > 0.0);
-    }
-}

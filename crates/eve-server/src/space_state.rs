@@ -11,9 +11,6 @@ use crate::{
 };
 use tracing::{error, warn};
 
-#[cfg(test)]
-mod tests;
-
 // Keep the motion fields at the top level so existing checkpoints and motion
 // inspection tools remain compatible. Module custody is revalidated on restore.
 #[derive(serde::Serialize,serde::Deserialize)]
@@ -134,21 +131,6 @@ fn saved(result: Result<(), Undone>) -> Result<bool, StoreError> {
         Err(Undone::Refused) => Ok(false),
         Err(Undone::Failed(e)) => Err(e),
     }
-}
-
-#[cfg(test)]
-pub async fn save_detached(
-    store: &Store,
-    system: i64,
-    ship: &Ship,
-    tick: i64,
-) -> Result<bool, StoreError> {
-    saved(store.write(|tx| {
-        if !lock_current(tx.db(), ship.pilot.char_id, ship.id, system)? || !write(tx, system, ship, tick)? {
-            return Err(Undone::Refused);
-        }
-        Ok(())
-    }))
 }
 
 pub async fn checkpoint(world: &World, store: &Store) {

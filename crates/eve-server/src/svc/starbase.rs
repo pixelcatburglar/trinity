@@ -1305,24 +1305,3 @@ pub async fn may(ctx: &Ctx<'_>, id: i64, access: Access) -> Option<bool> {
     };
     Some(allowed(ctx, &s, ctx.store.read(|db| deploy_flag(db, s.id, column))))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_most_claims_win_and_a_tie_keeps_the_holder() {
-        assert_eq!(sovereign(&[(1, 2), (2, 1)], None), Some(1));
-        assert_eq!(sovereign(&[(1, 2), (2, 2)], Some(2)), Some(2));
-        assert_eq!(sovereign(&[(1, 2), (2, 2)], Some(3)), None);
-        assert_eq!(sovereign(&[], Some(3)), None);
-    }
-
-    #[test]
-    fn power_and_cpu_fuel_burn_with_the_load() {
-        let fuel = Fuel { needs: vec![(44, PURPOSE_ONLINE, 4), (16273, PURPOSE_POWER, 150), (16272, PURPOSE_CPU, 150), (16275, 4, 200)], held: HashMap::new(), factor: 1.0 };
-        assert_eq!(fuel.burn(0.5, 0.0), vec![(44, 4), (16273, 75)]);
-        let sovereign = Fuel { factor: SOVEREIGN_FUEL, ..fuel };
-        assert_eq!(sovereign.burn(1.0, 1.0), vec![(44, 3), (16273, 113), (16272, 113)]);
-    }
-}

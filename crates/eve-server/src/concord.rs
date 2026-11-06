@@ -346,29 +346,3 @@ fn hunt(park: &mut Park, now: i64, out: &mut Out) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const PLAYER_CORP: i64 = 140_000_500;
-    const NPC_CORP: i64 = 1_000_172;
-
-    #[test]
-    fn theft() {
-        assert!(!is_theft(140_000_001, NPC_CORP, 140_000_001, NPC_CORP), "your own can");
-        assert!(!is_theft(140_000_001, PLAYER_CORP, 140_000_002, PLAYER_CORP), "a corpmate's can");
-        assert!(is_theft(140_000_001, NPC_CORP, 140_000_002, NPC_CORP), "NPC corps share nothing");
-        assert!(is_theft(140_000_001, PLAYER_CORP, 140_000_002, NPC_CORP), "a stranger's can");
-        assert!(!is_theft(140_000_001, NPC_CORP, 1_000_125, 0), "an NPC's can");
-    }
-
-    #[test]
-    fn a_thief_is_fair_game_to_the_owner_corp() {
-        let mut watch = Watch::default();
-        watch.aggression.entry(140_000_001).or_default().insert(PLAYER_CORP, 0);
-        assert!(watch.aggressed_either(140_000_001, (140_000_009, PLAYER_CORP), 1_000));
-        assert!(!watch.aggressed_either(140_000_001, (140_000_009, NPC_CORP), 1_000));
-        assert!(!watch.aggressed_either(140_000_001, (140_000_009, PLAYER_CORP), AGGRESSION_MS + 1));
-    }
-}

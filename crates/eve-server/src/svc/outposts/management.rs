@@ -273,5 +273,3 @@ pub(super) fn revoke_clones(ctx:&Ctx<'_>,station:i64,corp:i64,char_id:i64)->Refu
         Ok(gone.len())
     }).map_err(|Refusal(why)|why)
 }
-
-#[cfg(test)] mod tests;

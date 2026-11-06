@@ -362,4 +362,3 @@ async fn delete_bookmarks(ctx: &Ctx<'_>, arg: Option<&Value>) -> Value {
     }
     Value::None
 }
-

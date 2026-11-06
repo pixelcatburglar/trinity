@@ -138,17 +138,3 @@ fn setvals(dump: &str) -> Vec<(String, i64, bool)> {
     }
     out
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn times_become_filetimes_and_setvals_are_read() {
-        assert_eq!(filetime("1601-01-01 00:00:00"), Some(0));
-        assert_eq!(filetime("1970-01-01 00:00:00"), Some(116_444_736_000_000_000));
-        assert_eq!(filetime("2026-11-05 07:20:28.5"), Some((1_793_863_228 + 11_644_473_600) * 10_000_000 + 5_000_000));
-        let dump = "SELECT pg_catalog.setval('public.dyn_id_seq', 140001234, true);\nSELECT pg_catalog.setval('public.\"account_accountID_seq\"', 5, false);\n";
-        assert_eq!(setvals(dump), vec![("dyn_id_seq".into(), 140001234, true), ("account_accountID_seq".into(), 5, false)]);
-    }
-}

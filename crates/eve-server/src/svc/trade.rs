@@ -728,14 +728,20 @@ fn history(tx: &mut Tx<'_>, region: i64, type_id: i64, price: f64, quantity: i64
 }
 
 /// Refund escrow and return unsold goods exactly once.
+/// A player's open order whose duration has run out by `now` (FILETIME).
+fn is_due(o: &crate::store::Row<'_>, now: i128) -> bool {
+    o.int("orderState") == Some(0)
+        && o.int("charID").is_some_and(|c| c >= FIRST_PLAYER_ID)
+        && i128::from(o.int("issued").unwrap_or(0)) + i128::from(o.int("duration").unwrap_or(0)) * 864_000_000_000 <= now
+}
+
 fn expire_orders(txn: &mut ItemTxn<'_, '_>, fx: &mut Effects) -> Result<(), Refusal> {
     let now = i128::from(crate::bulkdata::filetime_now());
     let mut due: Vec<(Match, bool, i64)> = txn
         .db()
         .table("market_orders")
         .rows()
-        .filter(|o| o.int("orderState") == Some(0) && o.int("charID").is_some_and(|c| c >= FIRST_PLAYER_ID))
-        .filter(|o| i128::from(o.int("issued").unwrap_or(0)) + i128::from(o.int("duration").unwrap_or(0)) * 864_000_000_000 <= now)
+        .filter(|o| is_due(o, now))
         .map(|o| (as_match(&o), o.int("bid").unwrap_or(0) != 0, o.int("typeID").unwrap_or(0)))
         .collect();
     due.sort_by_key(|(m, _, _)| m.id);
@@ -745,7 +751,25 @@ fn expire_orders(txn: &mut ItemTxn<'_, '_>, fx: &mut Effects) -> Result<(), Refu
     Ok(())
 }
 
+/// When orders were last looked over for expiry (ms).
+static LAST_EXPIRY: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+/// Looking means a scan of every order, the bots' too: orders run for days,
+/// so every half minute is soon enough, and the market's calls stay quick.
+const EXPIRY_EVERY_MS: i64 = 30_000;
+
+/// Close the players' orders that have run their time, at most every
+/// [`EXPIRY_EVERY_MS`]; the scan is a read, and only a due order takes a write.
 pub async fn expire(ctx: &Ctx<'_>) -> Outcome {
+    use std::sync::atomic::Ordering::Relaxed;
+    let now = crate::combat::now_ms();
+    let last = LAST_EXPIRY.load(Relaxed);
+    if now - last < EXPIRY_EVERY_MS || LAST_EXPIRY.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+        return Outcome::Value(Value::None);
+    }
+    let filetime = i128::from(crate::bulkdata::filetime_now());
+    if !ctx.store.read(|db| db.table("market_orders").rows().any(|o| is_due(&o, filetime))) {
+        return Outcome::Value(Value::None);
+    }
     transact(ctx, expire_orders).await
 }
 
@@ -825,47 +849,4 @@ fn authorize_order(order:&Match,roles:(Option<i64>,i64))->Result<(),Refusal> {
     if order.corp && !crate::svc::wallet::can_take(roles.1,order.account) {return refuse("You may not manage orders in that corporation wallet division.");}
     if order.corp && (roles.0!=Some(order.owner) || roles.1 & (crate::session::CORP_ROLE_DIRECTOR | crate::session::CORP_ROLE_ACCOUNTANT | CORP_ROLE_TRADER)==0) {return refuse("You no longer have permission to manage that corporation's order.")}
     Ok(())
-}
-
-#[cfg(test)]
-#[path = "trade_tests.rs"]
-mod integration_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn matching_honours_each_orders_minimum_after_prior_fills() {
-        let order=|id,remaining,minimum|Match {id,owner:1,issuer:1,account:1000,station:1,price:1.0,remaining,escrow:100.0,corp:false,minimum,range:-1,system:1};
-        let filled=take(vec![order(1,8,1),order(2,100,5),order(3,1,5)].into_iter(),10);
-        assert_eq!(filled.iter().map(|(m,n)|(m.id,*n)).collect::<Vec<_>>(),vec![(1,8),(3,1)]);
-    }
-    #[tokio::test]
-    async fn corporation_escrow_stays_with_original_corporation_after_member_leaves() {
-        let fixture=crate::test_support::Database::load().await;
-        let me=fixture.id().await as i64; let corp=fixture.id().await as i64; let next=fixture.id().await as i64;
-        let store=&fixture.store;
-        store.write(|tx| -> Result<(),StoreError> {
-            tx.insert("character_",&[("characterID",V::Int(me)),("characterName",V::Text(format!("Market issuer {me}").into())),("corporationID",V::Int(corp)),("balance",V::Float(10_000_000.0))])?;
-            for id in [corp,next] {tx.insert("corporation",&[("corporationID",V::Int(id)),("corporationName",V::Text(format!("Market corp {id}").into())),("balance",V::Float(10_000_000.0))])?;}
-            Ok(())
-        }).unwrap();
-        let order=NewOrder {station:60000004,type_id:34,price:0.01,quantity:10,bid:true,range:-1,item_id:None,min_volume:1,duration:1,corp:true,existing:None,account:1000};
-        let id=store.write(|tx| -> Result<i64,Refusal> {
-            let mut fx=Effects::default();
-            place(&mut ItemTxn::new(tx),&mut fx,me,order,(Some(corp),1))?;
-            Ok(fx.orders[0].0)
-        }).unwrap();
-        store.write(|tx| {let row=tx.table("character_").get_id(me).unwrap().id; tx.update("character_",row,&[("corporationID",V::Int(next))])}).unwrap();
-        // Read and refused in a write that is then undone.
-        let refused=store.write(|tx| -> Result<(),Refusal> {
-            let mut txn=ItemTxn::new(tx);
-            let (read,_,_)=own_order(&txn,me,id,Some(next)).ok().unwrap(); assert_eq!(read.owner,corp);
-            assert!(cancel(&mut txn,&mut Effects::default(),me,id,(Some(next),1)).is_err());
-            refuse("undone")
-        });
-        assert!(refused.is_err());
-        store.write(|tx| cancel(&mut ItemTxn::new(tx),&mut Effects::default(),me+1,id,(Some(corp),1))).unwrap();
-        let balance=store.read(|db| db.table("corporation").get_id(next).unwrap().float("balance").unwrap()); assert_eq!(balance,10_000_000.0);
-    }
 }

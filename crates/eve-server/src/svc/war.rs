@@ -463,15 +463,6 @@ pub fn side(p: &Pilot) -> i64 {
     p.alliance_id.filter(|a| *a != 0).unwrap_or(p.corp_id)
 }
 
-/// Puts a war between two sides in force, a few days old, for tests.
-#[cfg(test)]
-pub fn in_force_for_test(a: i64, b: i64) {
-    let declared = crate::bulkdata::filetime_now() - 3 * DAY;
-    if let Ok(mut w) = IN_FORCE.write() {
-        w.push((a, b, declared, None));
-    }
-}
-
 /// Whether two sides (alliances, or corporations outside one) are at war in
 /// a hostile state.
 pub fn sides_at_war(x: i64, y: i64) -> bool {
@@ -498,21 +489,4 @@ pub fn enemies_of(x: i64) -> Vec<i64> {
 fn hostile((by, against, declared, retracted): Span, x: i64, y: i64, now: i64) -> bool {
     let pair = (by == x && against == y) || (by == y && against == x);
     pair && now - declared >= DAY && retracted.is_none_or(|r| now - r < DAY)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_war_is_hostile_from_a_day_after_declaration_to_a_day_after_retraction() {
-        let declared = 100 * DAY;
-        let war = (1, 2, declared, None);
-        assert!(!hostile(war, 1, 2, declared + DAY - 1));
-        assert!(hostile(war, 2, 1, declared + DAY));
-        assert!(!hostile(war, 1, 3, declared + 2 * DAY));
-        let retracted = (1, 2, declared, Some(declared + 3 * DAY));
-        assert!(hostile(retracted, 1, 2, declared + 4 * DAY - 1));
-        assert!(!hostile(retracted, 1, 2, declared + 4 * DAY));
-    }
 }

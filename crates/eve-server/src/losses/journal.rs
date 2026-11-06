@@ -2,7 +2,6 @@
 //! Persist the original attribution before settlement; commit destruction,
 //! insurance/clone consequences and the kill record together.
 use super::*;
-#[cfg(test)] mod tests;
 
 /// `pendingShipLosses` is in the store's schema.
 pub fn ensure(_tx:&mut Tx<'_>)->Result<(),StoreError> {

@@ -78,4 +78,3 @@ pub fn change(header: &[&str], old: Option<&[Value]>, new: Option<&[Value]>) -> 
 pub fn header_value(header: &[&str]) -> Value {
     Value::List(header.iter().map(|h| Value::bytes(*h)).collect())
 }
-

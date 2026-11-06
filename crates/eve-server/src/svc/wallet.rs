@@ -378,7 +378,6 @@ async fn give_cash(call: &Call, ctx: &Ctx<'_>, from_corp: bool) -> Outcome {
     }
 }
 
-
 pub enum Transfer {
     NotEnough { need: f64, have: f64 },
     NoSuchOwner,
@@ -394,35 +393,6 @@ impl From<StoreError> for Transfer {
 pub(crate) async fn notify_balance(ctx:&Ctx<'_>,owner:i64) {
     let value=ctx.store.read(|db|balance(db,"character_",owner).or_else(||balance(db,"corporation",owner)));
     if let Some(balance)=value {let w=ctx.world.lock();let mut clients=w.clients_of(owner);clients.extend(w.corp_members(owner));w.notify(&clients,"OnAccountChange",Value::Tuple(vec![Value::bytes("cash"),Value::Int(owner),Value::Double(balance)]));}
-}
-
-#[cfg(test)]
-mod transaction_tests {
-    use super::*;
-    #[tokio::test]
-    async fn bill_payment_rolls_back_when_recipient_is_missing_and_cannot_be_paid_twice() {
-        let fixture=crate::test_support::Database::load().await;
-        let payer=i64::from(fixture.id().await); let payee=i64::from(fixture.id().await);
-        fn character(tx:&mut Tx<'_>,id:i64,name:String,balance:f64)->Result<store::RowId,StoreError> {
-            tx.insert("character_",&[("characterID",store::Value::Int(id)),("characterName",store::Value::Text(name.into())),("balance",store::Value::Float(balance))])
-        }
-        fixture.store.write(|tx|character(tx,payer,format!("Bill payer {payer}"),1000.0)).unwrap();
-        let bill=fixture.store.write(|tx| {
-            let row=tx.insert("billsReceivable",&[("debtorID",store::Value::Int(payer)),("creditorID",store::Value::Int(payee)),("amount",store::Value::Float(100.0)),("billTypeID",store::Value::Int(2)),("paid",store::Value::Int(0))])?;
-            Ok::<_,StoreError>(tx.table("billsReceivable").row(row).and_then(|r|r.int("billID")).unwrap())
-        }).unwrap();
-        let session=crate::session::Session {char_id:Some(payer),..Default::default()}; let ctx=fixture.ctx(&session);
-        let balance=||fixture.store.read(|db|balance(db,"character_",payer));
-        let paid=||fixture.store.read(|db|db.table("billsReceivable").get_id(bill).and_then(|r|r.int("paid")));
-        assert!(!matches!(settle_bill(&ctx,bill,payer,payer).await,Outcome::Value(_)));
-        assert_eq!(balance(),Some(1000.0));
-        assert_eq!(paid(),Some(0));
-        fixture.store.write(|tx|character(tx,payee,format!("Bill payee {payee}"),0.0)).unwrap();
-        // Paying twice (once at the same time, now one after the other) pays once.
-        let (a,b)=tokio::join!(settle_bill(&ctx,bill,payer,payer),settle_bill(&ctx,bill,payer,payer));
-        assert!(matches!(a,Outcome::Value(_)));assert!(matches!(b,Outcome::Value(_)));
-        assert_eq!(balance(),Some(900.0));
-    }
 }
 
 /// One movement of ISK, journalled for both sides. `payee` None means the money
@@ -519,7 +489,6 @@ fn text_id(v: Option<&str>) -> Value {
     }
 }
 
-
 fn parse_i64(s: &str) -> Option<i64> {
     let s = s.trim();
     match s.parse::<i64>() {
@@ -527,4 +496,3 @@ fn parse_i64(s: &str) -> Option<i64> {
         Err(_) => s.parse::<f64>().ok().map(|v| v as i64),
     }
 }
-

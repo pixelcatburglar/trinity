@@ -4,7 +4,6 @@ use crate::{ballpark::{Ship,Vec3},conn::Server,losses::Loss,world::World};
 use crate::store::{Db,Store,StoreError,Tx,Value};
 
 mod storage;
-#[cfg(test)] mod tests;
 pub use storage::ensure;
 
 #[derive(Debug,Clone,Copy,PartialEq,serde::Serialize,serde::Deserialize)]

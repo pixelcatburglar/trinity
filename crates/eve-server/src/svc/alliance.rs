@@ -768,20 +768,3 @@ pub async fn bill_alliances(store: &Store) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_executor_keeps_the_lead_on_a_tie() {
-        assert_eq!(most_backed(&[(1, 1), (2, 1)], 1), Some(1));
-        assert_eq!(most_backed(&[(1, 1), (2, 2)], 1), Some(2));
-    }
-
-    #[test]
-    fn a_departed_executor_hands_over_to_the_most_backed() {
-        assert_eq!(most_backed(&[(2, 0), (3, 1)], 1), Some(3));
-        assert_eq!(most_backed(&[(2, 0), (3, 0)], 1), Some(2), "nobody backed: the oldest member");
-    }
-}

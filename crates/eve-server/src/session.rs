@@ -152,7 +152,6 @@ impl Session {
     }
 }
 
-
 fn default_for(name: &str) -> Value {
     match name {
         "role" => Value::Long(ROLE_LOGIN),

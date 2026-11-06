@@ -12,9 +12,6 @@ use std::sync::Arc;
 mod journal;
 pub use journal::{Pending, ensure, blocked, blocked_character, blocked_in_memory, blocked_character_in_memory, retry};
 
-#[cfg(test)]
-mod tests;
-
 #[derive(Clone)]
 struct Request {
     world: World,

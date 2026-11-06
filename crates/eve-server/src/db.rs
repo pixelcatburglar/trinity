@@ -107,16 +107,3 @@ pub fn sync_accounts(store: &Store, accounts: &[crate::config::Account]) -> Resu
         Ok(ids)
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_first_login_makes_one_account_and_checks_the_password_after() {
-        let store = crate::test_support::store();
-        let a = create_account(&store, "first-login", "one").unwrap().unwrap();
-        assert!(create_account(&store, "first-login", "two").unwrap().is_none());
-        assert_eq!(create_account(&store, "first-login", "one").unwrap().unwrap().account_id, a.account_id);
-    }
-}

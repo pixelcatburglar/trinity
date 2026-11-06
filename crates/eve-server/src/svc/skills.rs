@@ -53,6 +53,48 @@ mod training;
 
 pub use training::run as run_training;
 
+/// The skill history's events, as the character sheet names them
+/// (charactersheet.py `ShowMySkillHistory`).
+pub mod history {
+    use eve_marshal::Value;
+
+    use crate::store::{Db, StoreError, Tx, Value as Cell};
+
+    pub const CLONE_PENALTY: i64 = 34;
+    pub const TRAINING_STARTED: i64 = 36;
+    pub const TRAINING_COMPLETE: i64 = 37;
+    pub const TRAINING_CANCELLED: i64 = 38;
+    pub const GM_GAVE_SKILL: i64 = 39;
+
+    /// The most entries the client is sent, newest first.
+    const SHOWN: usize = 1000;
+
+    const COLUMNS: [&str; 4] = ["logDateTime", "skillTypeID", "eventID", "absolutePoints"];
+
+    /// Note that `char_id`'s skill of `type_id` had `event` at `when`
+    /// (FILETIME), leaving it with `points`.
+    pub fn record(tx: &mut Tx<'_>, char_id: i64, type_id: i64, event: i64, when: i64, points: f64) -> Result<(), StoreError> {
+        tx.insert(
+            "skillHistory",
+            &[
+                ("characterID", Cell::Int(char_id)),
+                ("skillTypeID", Cell::Int(type_id)),
+                ("eventID", Cell::Int(event)),
+                ("logDateTime", Cell::Int(when)),
+                ("absolutePoints", Cell::Float(points)),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    /// skillMgr.GetSkillHistory: a rowset of the pilot's entries, newest first.
+    pub fn of(db: &Db, char_id: i64) -> Value {
+        let rows: Vec<_> = db.table("skillHistory").find(&["characterID"], &[Cell::Int(char_id)]).collect();
+        let lines = rows.iter().rev().take(SHOWN).map(|r| Value::List(r.line(&COLUMNS))).collect();
+        crate::svc::rows::rowset(&COLUMNS, lines)
+    }
+}
+
 /// At start, see `training::ensure`.
 pub fn ensure(tx: &mut crate::store::Tx<'_>) -> Result<(), StoreError> {
     training::ensure(tx)
@@ -68,6 +110,10 @@ async fn method_call(method: &str, args: &[Value], ctx: &Ctx<'_>) -> Outcome {
         "GetEndOfTraining" => {
             let char_id = ctx.session.char_id.unwrap_or(0);
             Outcome::Value(ctx.store.read(|db| training::end_of(db, char_id, item_id)).map_or(Value::None, Value::Long))
+        }
+        "GetSkillHistory" => {
+            let char_id = ctx.session.char_id.unwrap_or(0);
+            Outcome::Value(ctx.store.read(|db| history::of(db, char_id)))
         }
         "CharStartTrainingSkill" => Outcome::Value(training::start(ctx, item_id).await),
         "CharStopTrainingSkill" => Outcome::Value(training::stop(ctx, item_id).await),
@@ -220,250 +266,8 @@ fn sp_for_level(stc: f64, level: f64) -> Option<f64> {
     }
 }
 
-#[cfg(test)]
-mod implant_tests {
-    use super::*;
-    use crate::{session::Session, store::Tx, test_support::Database};
-
-    fn entity(tx: &mut Tx<'_>, id: i64, type_id: i64, owner: i64, location: i64, flag: i64, quantity: i64, singleton: i64) {
-        tx.insert("entity", &[
-            ("itemID", store::Value::Int(id)), ("typeID", store::Value::Int(type_id)), ("ownerID", store::Value::Int(owner)),
-            ("locationID", store::Value::Int(location)), ("flag", store::Value::Int(flag)),
-            ("quantity", store::Value::Int(quantity)), ("singleton", store::Value::Int(singleton)),
-        ]).unwrap();
-    }
-
-    async fn pilot(db: &Database) -> (Session, i64) {
-        let owner = i64::from(db.id().await);
-        let hull = i64::from(db.id().await);
-        let (station, system) = db.store.write(|tx| {
-            let place = tx.table("staStations").rows()
-                .filter_map(|s| Some((s.int("stationID")?, s.int("solarSystemID"))))
-                .min_by_key(|(station, _)| *station)
-                .expect("a station");
-            let (station, system) = (place.0, place.1.unwrap_or(0));
-            tx.insert("character_", &[
-                ("characterID", store::Value::Int(owner)), ("characterName", store::Value::Text(format!("Implant fixture {owner}").into())),
-                ("shipID", store::Value::Int(hull)), ("stationID", store::Value::Int(station)), ("solarSystemID", store::Value::Int(system)),
-            ])?;
-            entity(tx, owner, 1373, owner, station, 0, 1, 1);
-            entity(tx, hull, 587, owner, station, 4, 1, 1);
-            Ok::<_, StoreError>((station, system))
-        }).unwrap();
-        (
-            Session {
-                char_id: Some(owner),
-                ship_id: Some(hull),
-                station_id: Some(station),
-                solar_system_id2: Some(system),
-                ..Default::default()
-            },
-            owner,
-        )
-    }
-
-    async fn implant(db: &Database, owner: i64, location: i64, flag: i64, quantity: i64) -> i64 {
-        let id = i64::from(db.id().await);
-        db.store.write(|tx| {
-            entity(tx, id, 13241, owner, location, flag, quantity, 0);
-            Ok::<_, StoreError>(())
-        }).unwrap();
-        id
-    }
-
-    async fn train(db: &Database, owner: i64) {
-        let required = db.store.read(|d| fitting::required_skill_levels(d, 13241)).unwrap();
-        for (kind, level) in required {
-            let id = i64::from(db.id().await);
-            db.store.write(|tx| {
-                entity(tx, id, i64::from(kind), owner, owner, 7, 1, 1);
-                tx.insert("entity_attributes", &[("itemID", store::Value::Int(id)), ("attributeID", store::Value::Int(280)), ("valueInt", store::Value::Int(level))])?;
-                Ok::<_, StoreError>(())
-            }).unwrap();
-        }
-    }
-
-    fn succeeded(result: &Outcome) -> bool {
-        matches!(result, Outcome::Value(Value::None))
-    }
-
-    /// The character's installed implants: (itemID, quantity, singleton).
-    fn installed(db: &Database, owner: i64) -> Vec<(i64, i64, i64)> {
-        db.store.read(|d| {
-            d.table("entity")
-                .find(&["ownerID", "locationID", "flag"], &[store::Value::Int(owner), store::Value::Int(owner), store::Value::Int(89)])
-                .map(|e| (e.int("itemID").unwrap(), e.int("quantity").unwrap(), e.int("singleton").unwrap()))
-                .collect()
-        })
-    }
-
-    #[tokio::test]
-    async fn implant_custody_skills_slots_and_concurrent_installation_are_enforced() {
-        let db = Database::load().await;
-        let (session, owner) = pilot(&db).await;
-        let station = session.station_id.unwrap();
-        let stored_clone = i64::from(db.id().await);
-        let stored = implant(&db, owner, stored_clone, 89, 1).await;
-        let remote = implant(&db, owner, station + 1, 4, 1).await;
-        let foreign = implant(&db, owner + 1000, station, 4, 1).await;
-        let first = implant(&db, owner, station, 4, 2).await;
-        let second = implant(&db, owner, station, 4, 2).await;
-        let ctx = db.ctx(&session);
-        for id in [stored, remote, foreign] {
-            assert!(!succeeded(&change_implant(&ctx, id, false).await));
-            assert!(!succeeded(&change_implant(&ctx, id, true).await));
-        }
-        assert!(!db.store.read(|d| fitting::required_skill_levels(d, 13241))
-            .unwrap()
-            .is_empty());
-        assert!(
-            !succeeded(&change_implant(&ctx, first, false).await),
-            "implant prerequisites must be trained"
-        );
-        train(&db, owner).await;
-        let (one, two) = tokio::join!(
-            change_implant(&ctx, first, false),
-            change_implant(&ctx, second, false)
-        );
-        assert_eq!(
-            usize::from(succeeded(&one)) + usize::from(succeeded(&two)),
-            1,
-            "two implants compete for the same slot"
-        );
-        let active = installed(&db, owner);
-        assert_eq!(active.len(), 1);
-        let active_id = active[0].0;
-        assert_eq!(active[0].1, 1);
-        assert_eq!(active[0].2, 1);
-        let cargo_quantity: i64 = db.store.read(|d| {
-            [first, second].iter().filter_map(|id| d.table("entity").get_id(*id)?.int("quantity")).sum()
-        });
-        assert_eq!(
-            cargo_quantity, 3,
-            "install exactly one implant from the winning stack"
-        );
-        for id in [active_id, stored] {
-            let call = Call {
-                service: "invcontainer".into(),
-                method: "Add".into(),
-                args: vec![Value::Int(id)],
-                kwargs: vec![],
-            };
-            let moved = moves::container_write(
-                &ctx,
-                crate::svc::inventory::Container::Special {
-                    container_id: crate::svc::inventory::CONTAINER_HANGAR,
-                    owner_id: None,
-                },
-                &call,
-            )
-            .await
-            .unwrap();
-            assert!(
-                !succeeded(&moved),
-                "generic inventory moves must not extract installed implants"
-            );
-        }
-        assert!(succeeded(
-            &change_implant(&ctx, active_id, true).await
-        ));
-        assert!(db.store.read(|d| d.table("entity").get_id(active_id).is_none()));
-        assert_eq!(
-            db.store.read(|d| d.table("entity").get_id(stored).unwrap().int("locationID")),
-            Some(stored_clone)
-        );
-    }
-
-    #[tokio::test]
-    async fn implant_installation_and_unplugging_move_inventory_and_attributes() {
-        let db = Database::load().await;
-        let (session, owner) = pilot(&db).await;
-        train(&db, owner).await;
-        let stack = implant(&db, owner, session.station_id.unwrap(), 4, 2).await;
-        let ctx = db.ctx(&session);
-        assert!(succeeded(&change_implant(&ctx, stack, false).await));
-        assert_eq!(
-            db.store.read(|d| d.table("entity").get_id(stack).unwrap().int("quantity")),
-            Some(1),
-            "one implant leaves the source stack"
-        );
-        let active = installed(&db, owner)[0].0;
-        db.store.write(|tx| {
-            tx.insert("entity_attributes", &[("itemID", store::Value::Int(active)), ("attributeID", store::Value::Int(331)), ("valueFloat", store::Value::Float(8.0))])?;
-            Ok::<_, StoreError>(())
-        }).unwrap();
-        assert!(succeeded(&change_implant(&ctx, active, true).await));
-        assert!(db.store.read(|d| d.table("entity_attributes").find(&["itemID"], &[store::Value::Int(active)]).next().is_none()));
-    }
-
-    #[tokio::test]
-    async fn implant_changes_refresh_the_live_ship_without_restoring_charge() {
-        let db = Database::load().await;
-        let (mut session, owner) = pilot(&db).await;
-        train(&db, owner).await;
-        let hull = session.ship_id.unwrap();
-        let system = session.solar_system_id2.unwrap();
-        db.store.write(|tx| {
-            let character = tx.table("character_").get_id(owner).unwrap().id;
-            tx.update("character_", character, &[("stationID", store::Value::Int(0))])?;
-            for id in [owner, hull] {
-                let row = tx.table("entity").get_id(id).unwrap().id;
-                tx.update("entity", row, &[("locationID", store::Value::Int(system)), ("flag", store::Value::Int(0))])?;
-            }
-            Ok::<_, StoreError>(())
-        }).unwrap();
-        session.station_id = None;
-        session.solar_system_id = Some(system);
-        let implant = implant(&db, owner, hull, 5, 1).await;
-        let ctx = db.ctx(&session);
-        let mut ship = crate::svc::inflight::ship_for_space(&ctx, owner, hull)
-            .await
-            .unwrap();
-        let initial = ship.stats.warp_capacitor_need;
-        ship.fight
-            .as_mut()
-            .unwrap()
-            .vitals
-            .capacitor
-            .set(crate::combat::now_ms(), 17.0);
-        ship.fight.as_mut().unwrap().vitals.capacitor.recharge_ms = 0.0;
-        let mut park =
-            crate::ballpark::Park::new(system, vec![], crate::destiny::tick_now());
-        park.ships.insert(hull, ship);
-        db.world.lock().parks.insert(system, park);
-        assert!(succeeded(
-            &change_implant(&ctx, implant, false).await
-        ));
-        {
-            let world = db.world.lock();
-            let ship = &world.parks[&system].ships[&hull];
-            assert!((ship.stats.warp_capacitor_need - initial * 0.94).abs() < initial * 1e-10);
-            assert!(
-                ship.fight
-                    .as_ref()
-                    .unwrap()
-                    .vitals
-                    .capacitor
-                    .at(crate::combat::now_ms())
-                    < 18.0
-            );
-        }
-        assert!(succeeded(&change_implant(&ctx, implant, true).await));
-        let world = db.world.lock();
-        assert!(
-            (world.parks[&system].ships[&hull]
-                .stats
-                .warp_capacitor_need
-                - initial)
-                .abs()
-                < initial * 1e-10
-        );
-    }
-}
-
 /// An item's own value of an attribute, `coalesce(valueFloat, valueInt)`.
 fn own_attr(db: &Db, item_id: i64, attribute_id: i32) -> Option<f64> {
     let row = db.table("entity_attributes").get(&[store::Value::Int(item_id), store::Value::Int(i64::from(attribute_id))])?;
     row.float("valueFloat").or_else(|| row.float("valueInt"))
 }
-

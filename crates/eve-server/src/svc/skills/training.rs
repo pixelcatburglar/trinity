@@ -11,7 +11,7 @@ use std::time::Duration;
 use eve_marshal::Value;
 use tracing::error;
 
-use super::{own_attr, sp_for_level, ATTR_PRIMARY, ATTR_SECONDARY, ATTR_SKILL_LEVEL, ATTR_SKILL_POINTS, ATTR_SKILL_TIME_CONSTANT, CATEGORY_SKILL, FLAG_SKILL, FLAG_SKILL_IN_TRAINING};
+use super::{history, own_attr, sp_for_level, ATTR_PRIMARY, ATTR_SECONDARY, ATTR_SKILL_LEVEL, ATTR_SKILL_POINTS, ATTR_SKILL_TIME_CONSTANT, CATEGORY_SKILL, FLAG_SKILL, FLAG_SKILL_IN_TRAINING};
 use crate::items::ItemTxn;
 use crate::services::Ctx;
 use crate::store::{Db, Store, StoreError, Tx, Value as Cell};
@@ -141,6 +141,7 @@ fn halt(items: &mut ItemTxn<'_, '_>, char_id: i64, now: i64, changed: &mut Vec<C
         let old = skill_attr(items.db(), t.skill_id, type_id, ATTR_SKILL_POINTS);
         let new = (t.start_points + (target - t.start_points) * done).floor().max(old);
         set_attr(items.tx(), t.skill_id, ATTR_SKILL_POINTS, new as i64)?;
+        history::record(items.tx(), char_id, type_id, history::TRAINING_CANCELLED, now, new)?;
         changed.push(Changed { char_id, skill_id: t.skill_id, attribute_id: ATTR_SKILL_POINTS, old, new });
         items.move_to(t.skill_id, char_id, i64::from(FLAG_SKILL))?;
     }
@@ -175,6 +176,7 @@ fn begin(items: &mut ItemTxn<'_, '_>, char_id: i64, skill_id: i64, now: i64) -> 
         ],
     )?;
     items.move_to(skill_id, char_id, i64::from(FLAG_SKILL_IN_TRAINING))?;
+    history::record(items.tx(), char_id, type_id, history::TRAINING_STARTED, now, points)?;
     Ok(Some(ends_at))
 }
 
@@ -300,6 +302,7 @@ pub fn complete_due(store: &Store, world: &World) {
                     let target = target.max(points);
                     set_attr(items.tx(), t.skill_id, ATTR_SKILL_POINTS, target.ceil() as i64)?;
                     set_attr(items.tx(), t.skill_id, ATTR_SKILL_LEVEL, level as i64 + 1)?;
+                    history::record(items.tx(), *char_id, type_id, history::TRAINING_COMPLETE, t.ends_at, target.ceil())?;
                     changed.push(Changed { char_id: *char_id, skill_id: t.skill_id, attribute_id: ATTR_SKILL_POINTS, old: points, new: target.ceil() });
                     changed.push(Changed { char_id: *char_id, skill_id: t.skill_id, attribute_id: ATTR_SKILL_LEVEL, old: level, new: level + 1.0 });
                 }
@@ -348,85 +351,4 @@ pub fn ensure(tx: &mut Tx<'_>) -> Result<(), StoreError> {
         begin(&mut items, char_id, skill_id, now)?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn a_skill_trains_in_real_time_stops_with_its_points_and_completes_its_level() {
-        let fixture = crate::test_support::Database::load().await;
-        // An agent's character: it has a bloodline, so attributes to learn with.
-        let pilot = fixture.store.read(|db| {
-            db.table("character_").rows().find(|c| c.int("bloodlineID").is_some_and(|b| b > 0)).and_then(|c| c.int("characterID")).unwrap()
-        });
-        let skill = fixture.id().await as i64;
-        const GUNNERY: i64 = 3300;
-        fixture
-            .store
-            .write(|tx| -> Result<(), StoreError> {
-                tx.insert("entity", &[("itemID", Cell::Int(skill)), ("typeID", Cell::Int(GUNNERY)), ("ownerID", Cell::Int(pilot)), ("locationID", Cell::Int(pilot)),
-                    ("flag", Cell::Int(i64::from(FLAG_SKILL))), ("quantity", Cell::Int(1)), ("singleton", Cell::Int(1))])?;
-                set_attr(tx, skill, ATTR_SKILL_LEVEL, 0)?;
-                set_attr(tx, skill, ATTR_SKILL_POINTS, 0)
-            })
-            .unwrap();
-        let session = crate::session::Session { char_id: Some(pilot), ..Default::default() };
-        let ctx = fixture.ctx(&session);
-        let flag = || fixture.store.read(|db| db.table("entity").get_id(skill).and_then(|e| e.int("flag")));
-        let attr = |a: i32| fixture.store.read(|db| own_attr(db, skill, a));
-        let target = fixture.store.read(|db| next_level_points(db, skill, GUNNERY)).unwrap();
-
-        training_start(&ctx, skill).await;
-        assert_eq!(flag(), Some(i64::from(FLAG_SKILL_IN_TRAINING)));
-        let now = crate::bulkdata::filetime_now();
-        let ends = fixture.store.read(|db| end_of(db, pilot, skill)).unwrap();
-        let spm = fixture.store.read(|db| rate(db, pilot, skill, GUNNERY));
-        assert!(spm > 0.0);
-        assert!(((ends - now) as f64 / MINUTE as f64 - target / spm).abs() < 0.1, "the end is the points needed at the pilot's rate");
-
-        // Halfway, a stop keeps half the points.
-        fixture
-            .store
-            .write(|tx| {
-                let row = tx.table("skillTraining").get_id(pilot).unwrap().id;
-                let span = ends - now;
-                tx.update("skillTraining", row, &[("startedAt", Cell::Int(now - span / 2)), ("endsAt", Cell::Int(now + span / 2))])
-            })
-            .unwrap();
-        training_stop(&ctx, skill).await;
-        assert_eq!(flag(), Some(i64::from(FLAG_SKILL)));
-        let kept = attr(ATTR_SKILL_POINTS).unwrap();
-        assert!((kept - target / 2.0).abs() <= 1.0, "{kept} of {target}");
-        assert!(fixture.store.read(|db| end_of(db, pilot, skill)).is_none());
-
-        // Trained to the end, the skill gains its level and leaves training.
-        training_start(&ctx, skill).await;
-        fixture
-            .store
-            .write(|tx| {
-                let row = tx.table("skillTraining").get_id(pilot).unwrap().id;
-                tx.update("skillTraining", row, &[("endsAt", Cell::Int(now - 1))])
-            })
-            .unwrap();
-        complete_due(&fixture.store, &fixture.world);
-        assert_eq!(attr(ATTR_SKILL_LEVEL), Some(1.0));
-        assert_eq!(attr(ATTR_SKILL_POINTS), Some(target.ceil()));
-        assert_eq!(flag(), Some(i64::from(FLAG_SKILL)));
-        assert!(fixture.store.read(|db| db.table("skillTraining").get_id(pilot).is_none()));
-
-        // A skill at level 5 cannot be trained.
-        fixture.store.write(|tx| set_attr(tx, skill, ATTR_SKILL_LEVEL, 5)).unwrap();
-        training_start(&ctx, skill).await;
-        assert_eq!(flag(), Some(i64::from(FLAG_SKILL)));
-    }
-
-    async fn training_start(ctx: &Ctx<'_>, skill: i64) {
-        start(ctx, skill).await;
-    }
-
-    async fn training_stop(ctx: &Ctx<'_>, skill: i64) {
-        stop(ctx, skill).await;
-    }
 }

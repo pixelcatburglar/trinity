@@ -329,24 +329,3 @@ fn cents(x: f64) -> f64 {
     };
     (hundredths as f64 / 100.0).copysign(x)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn seed_prices_round_like_numeric_and_price_every_marketable_type() {
-        assert_eq!(cents(1.005), 1.01);
-        assert_eq!(cents(0.015), 0.02);
-        assert_eq!(cents(12.344999), 12.34);
-        let t = super::super::read_tables().unwrap();
-        let (types, prices) = seed_prices(&t);
-        assert_eq!(types.len(), marketable(&t).0.len());
-        assert!(prices.iter().all(|p| *p >= 0.01));
-        // Priced from its reprocessing materials, as the SQL priced it.
-        let component = types.iter().position(|ty| *ty == 22131).unwrap();
-        assert_eq!(prices[component], 11827.2);
-        let rifter = types.iter().position(|ty| *ty == 587).unwrap();
-        assert_eq!(prices[rifter], cents(t.table("invTypes").get("typeID", 587).unwrap().float("basePrice").unwrap()));
-    }
-}

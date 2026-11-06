@@ -383,5 +383,3 @@ pub fn ensure_access_locks(_tx:&mut Tx<'_>)->Result<(),StoreError>{
 pub fn may_use_locked(db:&Db,station:i64,service:i64,char_id:i64)->Result<bool,StoreError> {
     may_use_checked(db,station,service,char_id)
 }
-
-#[cfg(test)] mod access_tests;

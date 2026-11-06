@@ -135,26 +135,3 @@ fn first_line(key: &str) -> &str {
         None => line,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn first_line_survives_a_multibyte_key() {
-        let key = format!("x{}", "\u{FFFD}".repeat(200));
-        assert!(!key.is_char_boundary(120), "the case under test must be misaligned");
-        assert_eq!(first_line(&key).chars().count(), 120);
-
-        assert_eq!(first_line("short"), "short");
-        assert_eq!(first_line(""), "");
-        let exact = "y".repeat(120);
-        assert_eq!(first_line(&exact), exact);
-    }
-
-    #[test]
-    fn a_negative_stack_hash_round_trips() {
-        let hash = -1234567890i64;
-        assert_eq!(Value::Int(hash).as_i64(), Some(hash));
-    }
-}

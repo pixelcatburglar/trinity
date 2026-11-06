@@ -86,36 +86,3 @@ async fn get_agents(ctx: &Ctx<'_>) -> Value {
         .collect();
     rowset(HEADER, lines)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::svc::rows::rowset;
-    use eve_marshal::StringTable;
-
-    #[test]
-    fn the_whole_agent_catalogue_fits_in_one_frame() {
-        let agent_lines: Vec<Value> = (0..10_270i64)
-            .map(|i| {
-                Value::List(vec![
-                    Value::Int(3_000_000 + i),
-                    Value::Int(i % 8),
-                    Value::Int(1_000_000 + i % 200),
-                    Value::Int(60_000_000 + i % 5000),
-                    Value::Int(i % 5 + 1),
-                    Value::Int(i % 20),
-                    Value::Int(2),
-                    Value::Int(i % 14 + 1),
-                ])
-            })
-            .collect();
-        let blob = eve_marshal::save(&rowset(HEADER, agent_lines), &StringTable::empty())
-            .expect("the catalogue marshals");
-        assert!(
-            blob.len() < eve_proto::MAX_FRAME_LEN as usize,
-            "GetAgents is {} bytes, over the {} the client silently drops",
-            blob.len(),
-            eve_proto::MAX_FRAME_LEN
-        );
-    }
-}

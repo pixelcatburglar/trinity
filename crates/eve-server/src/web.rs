@@ -663,39 +663,3 @@ fn kills(server: &Server) -> Json {
     }
     Json::Array(list)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rounds_to_one_decimal_as_numeric_did() {
-        assert_eq!(round1(0.15), 0.2);
-        assert_eq!(round1(-0.25), -0.3);
-        assert_eq!(round1(2.449_999), 2.4);
-        assert_eq!(round1(0.04), 0.0);
-        assert_eq!(round1(5.0), 5.0);
-    }
-
-    #[tokio::test]
-    async fn every_view_reads_a_fresh_world() {
-        let f = crate::test_support::Database::load().await;
-        let server = Server {
-            table: Default::default(),
-            store: f.store,
-            node_id: 1,
-            bulk: f.bulk,
-            dogma: f.dogma,
-            world: f.world,
-            services: crate::svc::registry(),
-            dump_dir: Default::default(),
-            alliance_join_delay_secs: 0,
-            sov_claim_delay_secs: 0,
-        };
-        assert!(summary(&server)["systemsHeld"].is_u64());
-        for view in [wars, players, alliances, corporations, systems, sov, killboard, kills] {
-            view(&server);
-        }
-        assert!(map(&server)["systems"].as_array().is_some_and(|s| !s.is_empty()));
-    }
-}

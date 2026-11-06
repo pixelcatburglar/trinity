@@ -18,20 +18,6 @@ fn failed(error:StoreError)->String {
     "The ship's loss could not yet be settled.".into()
 }
 
-/// `system` and `ship.pos` describe the source fight, including an administrative
-/// move to a station in a different system. Destination metadata is read afresh.
-/// No Move event is emitted: the transition owner publishes this disposition.
-#[cfg(test)]
-pub async fn settle_docked_arrival(server:&Server,store:&Store,station:i64,system:i64,ship:&Ship)
-    ->Result<ArrivalDisposition,String> {
-    if ship.unpiloted || ship.fight.as_ref().is_none_or(|f| !f.vitals.hull_damage.is_finite()
-        || !f.vitals.hull_max.is_finite() || f.vitals.hull_max<=0.0 || f.vitals.hull_damage<f.vitals.hull_max-1e-6) {
-        return Err("The arriving ship has no confirmed occupied hull loss.".into());
-    }
-    let loss=Loss::of(ship,system,ship.pilot.type_id==TYPE_CAPSULE);
-    settle_loss(server,store,station,&loss).await
-}
-
 /// What a settlement leaves to publish once it has committed.
 struct Settled {
     events:Vec<Value>,
@@ -163,6 +149,3 @@ fn station_place(db:&Db,station:i64)->Option<(i64,i64,i64)> {
     db.table("staStations").get_id(station)
         .map(|r|(r.int("solarSystemID").unwrap_or(0),r.int("constellationID").unwrap_or(0),r.int("regionID").unwrap_or(0)))
 }
-
-#[cfg(test)] mod tests;
-

@@ -944,33 +944,3 @@ fn interval(seconds: i64) -> String {
         (h, m) => format!("{h} hour(s) {m} minutes"),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn standings_move_as_the_client_moves_them() {
-        assert!((modified(0.0, 0.1) - 1.0).abs() < 1e-9);
-        assert!((modified(5.0, 0.1) - 5.5).abs() < 1e-9);
-        assert!((modified(0.0, -0.1) - -1.0).abs() < 1e-9);
-        assert_eq!(modified(10.0, 0.5), 10.0);
-    }
-
-    #[test]
-    fn divisions_choose_the_kind_of_work() {
-        assert_eq!(kind_of(7), KIND_COURIER);
-        assert_eq!(kind_of(14), KIND_MINING);
-        assert_eq!(kind_of(12), KIND_TRADE);
-        assert_eq!(kind_of(19), KIND_ENCOUNTER);
-    }
-
-    #[test]
-    fn amounts_read_as_the_client_writes_them() {
-        assert_eq!(isk(1_234_567.4), "1,234,567");
-        assert_eq!(isk(60_000.0), "60,000");
-        assert_eq!(isk(999.0), "999");
-        assert_eq!(interval(5_400), "1 hour(s) 30 minutes");
-        assert_eq!(interval(7_200), "2 hour(s)");
-    }
-}

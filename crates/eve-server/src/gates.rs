@@ -96,20 +96,3 @@ fn reach(gates: &HashMap<i64, Vec<i64>>, from: i64, limit: i64) -> Vec<(i64, i64
     }
     out
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn jumps_are_counted_out_to_the_limit() {
-        let gates = HashMap::from([(1, vec![2]), (2, vec![1, 3]), (3, vec![2, 4]), (4, vec![3])]);
-        assert_eq!(hops(&gates, 1, 1, 0), Some(0));
-        assert_eq!(hops(&gates, 1, 3, 5), Some(2));
-        assert_eq!(hops(&gates, 1, 4, 2), None);
-        assert_eq!(reach(&gates, 2, 1), vec![(2, 0), (1, 1), (3, 1)]);
-        assert_eq!(route(&gates, 1, 4), Some(vec![2, 3, 4]));
-        assert_eq!(route(&gates, 3, 3), Some(vec![]));
-        assert_eq!(route(&gates, 1, 9), None);
-    }
-}

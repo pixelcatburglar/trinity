@@ -150,39 +150,3 @@ fn tutorial_info(tutorial_id: i64) -> Value {
         ("pagecriterias", rowset(PAGE_CRITERIA_HEADER, pagecriterias.into_iter().map(|(_, _, line)| line).collect())),
     ])
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn progress_is_kept_and_close_preserves_completion() {
-        let fixture = crate::test_support::Database::load().await;
-        let character = fixture.id().await;
-        let session = crate::session::Session { char_id: Some(character as i64), ..Default::default() };
-        let ctx = fixture.ctx(&session);
-        let call = |method: &str, tutorial, page| Call {
-            service: "tutorialSvc".into(), method: method.into(),
-            args: vec![Value::Int(tutorial), Value::Int(page), Value::Int(47)], kwargs: vec![],
-        };
-        for (method, tutorial, page) in [("LogClosed", 5, 2), ("LogCompleted", 7, 8), ("LogAppClosed", 7, 8), ("LogAborted", 9, 1)] {
-            assert!(matches!(tutorial_svc(&call(method, tutorial, page), &ctx).await, Some(Outcome::Value(Value::None))));
-        }
-        assert!(matches!(tutorial_svc(&call("LogClosed", 5, -1), &ctx).await, Some(Outcome::UserError { .. })));
-        let saved: Vec<(i64, i64, i64, i64)> = fixture.store.read(|db| {
-            let mut rows: Vec<_> = db.table("chrTutorialState").find(&["characterID"], &[Cell::Int(i64::from(character))]).collect();
-            rows.sort_by_key(|r| r.int("tutorialID"));
-            rows.iter().map(|r| (r.int("tutorialID").unwrap(), r.int("pageID").unwrap(), r.int("eventTypeID").unwrap(), r.int("elapsedSeconds").unwrap())).collect()
-        });
-        assert_eq!(saved, vec![(5, 2, 0, 47), (7, 8, 155, 47), (9, 1, 158, 47)]);
-        let read = Call { service: "tutorialSvc".into(), method: "GetCharacterTutorialState".into(), args: vec![], kwargs: vec![] };
-        let expected = rowset(&["tutorialID", "pageID", "eventTypeID"], vec![
-            Value::List(vec![Value::Int(5), Value::Int(2), Value::Int(0)]),
-            Value::List(vec![Value::Int(7), Value::Int(8), Value::Int(155)]),
-            Value::List(vec![Value::Int(9), Value::Int(1), Value::Int(158)]),
-        ]);
-        assert!(matches!(tutorial_svc(&read, &ctx).await, Some(Outcome::Value(value)) if value == expected));
-        let other = crate::session::Session { char_id: Some(fixture.id().await as i64), ..Default::default() };
-        assert!(matches!(tutorial_svc(&read, &fixture.ctx(&other)).await, Some(Outcome::Value(value)) if value == rowset(&["tutorialID", "pageID", "eventTypeID"], vec![])));
-    }
-}

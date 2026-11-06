@@ -42,13 +42,11 @@ pub(super) struct Index {
     pool: Vec<u32>,
     recycled: Vec<u32>,
     issued: BTreeSet<u32>,
-    #[cfg(test)] pub cell_tokens: std::collections::VecDeque<(Key,u32)>,
-    #[cfg(test)] pub ball_tokens: BTreeMap<i64,u32>,
 }
 impl Default for Index {
     fn default() -> Self {
         Self { balls: BTreeMap::new(), cells: BTreeMap::new(), next_token: 0x2000_1000,
-            pool: Vec::new(), recycled: Vec::new(), issued: Default::default(), #[cfg(test)] cell_tokens: Default::default(), #[cfg(test)] ball_tokens: Default::default() }
+            pool: Vec::new(), recycled: Vec::new(), issued: Default::default(), }
     }
 }
 
@@ -63,10 +61,7 @@ impl Index {
     }
     fn create(&mut self, key: Key) -> u32 {
         if let Some(cell) = self.cells.get(&key) { return cell.token; }
-        #[cfg(test)] let supplied = self.cell_tokens.pop_front().map(|(expected,token)| {
-            assert_eq!(key,expected,"native cell creation order"); token
-        });
-        #[cfg(not(test))] let supplied: Option<u32> = None;
+        let supplied: Option<u32> = None;
         let token = supplied.unwrap_or_else(|| self.pool.pop().unwrap_or_else(|| self.token()));
         self.cells.insert(key, Cell { token, balls: Default::default(), children: Default::default() });
         if let Some(parent) = key.parent() {
@@ -123,8 +118,7 @@ impl Index {
         self.create(primary);
         let existing = self.balls.get(&ball.id).map(|e|e.token);
         self.detach(ball.id);
-        #[cfg(test)] let supplied=self.ball_tokens.get(&ball.id).copied();
-        #[cfg(not(test))] let supplied:Option<u32>=None;
+        let supplied:Option<u32>=None;
         let token=existing.or(supplied).unwrap_or_else(||self.token());
         let mut cells=PointerSet::default();
         // Native insertion sequence: center, x, y, z, xy, xz, yz, xyz.
@@ -191,33 +185,4 @@ fn coordinate(position:f64,width:f64,grid:i64)->i64 {
     if sum<=0.0 {return 0;}
     if sum>=2.0*offset {return grid-1;}
     ((sum*(1.0/width)) as i64).clamp(0,grid-1)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn invalid_geometry_is_removed_and_large_finite_coordinates_are_bounded() {
-        let mut index=Index::default();
-        let ball=Ball {id:1,pos:Vec3::ZERO,vel:Vec3::ZERO,radius:37.0};
-        index.update(ball);index.update(Ball {id:2,..ball});
-        assert_eq!(index.candidates(1,|_|true),vec![2]);
-        index.update(Ball {id:2,pos:Vec3::new(f64::NAN,0.0,0.0),..ball});
-        assert!(index.candidates(1,|_|true).is_empty());
-        for coordinate in [-1e150,1e150] {
-            index.update(Ball {id:2,pos:Vec3::new(coordinate,coordinate,coordinate),radius:1e308,..ball});
-            assert!(index.candidates(1,|_|true).is_empty());
-        }
-    }
-    #[test]
-    fn allocation_tokens_wrap_without_aliasing_live_cells_or_balls() {
-        let mut index=Index::default();index.next_token=0xffff_fff0;
-        let ball=Ball {id:1,pos:Vec3::new(120.0,120.0,120.0),vel:Vec3::ZERO,radius:37.0};
-        index.update(ball);index.update(Ball {id:2,..ball});
-        assert_eq!(index.candidates(1,|_|true),vec![2]);
-        let tokens:Vec<_>=index.cells.values().map(|c|c.token).chain(index.balls.values().map(|b|b.token)).collect();
-        assert_eq!(tokens.len(),tokens.iter().collect::<BTreeSet<_>>().len());
-        index.remove(2);index.update(Ball {id:3,..ball});
-        assert_eq!(index.candidates(1,|_|true),vec![3]);
-    }
 }

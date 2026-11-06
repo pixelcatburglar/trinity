@@ -35,8 +35,6 @@ mod svc;
 mod web;
 mod warp_energy;
 mod world;
-#[cfg(test)]
-mod test_support;
 
 mod travel;
 

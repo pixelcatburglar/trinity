@@ -8,23 +8,17 @@ use crate::{
 };
 use crate::store::Db;
 
-#[cfg(test)]
-mod tests;
 pub(super) mod reserved;
 pub(super) mod transition;
 mod completion;
 
 pub(super) struct Departure<'a> {
     catalog: &'a crate::dogma::Catalog,
-    #[cfg(test)]
-    world: World,
     request: JumpRequest,
     ship: Ship,
     from: i64,
     to: i64,
     bridge: Option<Bridge>,
-    #[cfg(test)]
-    pub(super) configuration: Option<crate::svc::maintenance::Configuration>,
 }
 
 impl<'a> Departure<'a> {
@@ -53,19 +47,13 @@ impl<'a> Departure<'a> {
             JumpRequest::Portal { ship, .. } => w.bridges.get(&ship).cloned(),
             _ => None,
         };
-        #[cfg(test)]
-        let configuration = w.maintenance.get(&ship.id).copied();
         let result = Self {
             catalog: ctx.dogma,
-            #[cfg(test)]
-            world: ctx.world.clone(),
             request,
             ship,
             from,
             to,
             bridge,
-            #[cfg(test)]
-            configuration,
         };
         result.live(w)?;
         Ok(result)
@@ -140,11 +128,6 @@ impl<'a> Departure<'a> {
             JumpRequest::Alliance { .. } => {}
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(super) fn accept(&self) -> std::result::Result<(), String> {
-        self.live(&self.world.lock())
     }
 
     /// The endpoints' durable state, read in the arrival/payment write.

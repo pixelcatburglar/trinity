@@ -73,8 +73,6 @@ fn cached_orders(value: Value) -> Outcome {
     })
 }
 
-
-
 const GROUP_HEADER: &[&str] = &[
     "marketGroupID",
     "parentGroupID",
@@ -307,7 +305,6 @@ async fn best_asks(ctx: &Ctx<'_>, scope: Scope) -> Value {
         Value::Dict(best.iter().map(|(type_id, r)| (Value::Int(*type_id), row(ORDER_HEADER, order_line(db, r)))).collect())
     })
 }
-
 
 fn history_rows(lines: Vec<Vec<Value>>) -> Value {
     use eve_marshal::dbrow::{dbtype, DbRow, DbRowDescriptor};

@@ -571,7 +571,7 @@ fn lose_skill_points(txn: &mut ItemTxn<'_, '_>, char_id: i64) -> Result<Option<(
         .max_by(f64::total_cmp);
     let saved = saved.or_else(|| sde.type_attribute(TYPE_CLONE_ALPHA, attr::SKILL_POINTS_SAVED)).unwrap_or(f64::MAX);
     let attributes = db.table("entity_attributes");
-    let skills: Vec<(i64, String, f64, f64)> = entity
+    let skills: Vec<(i64, i64, String, f64, f64)> = entity
         .find(&["locationID"], &[store::Value::Int(char_id)])
         .filter(|e| matches!(e.int("flag"), Some(FLAG_SKILL | FLAG_SKILL_IN_TRAINING)))
         .filter_map(|e| {
@@ -583,15 +583,15 @@ fn lose_skill_points(txn: &mut ItemTxn<'_, '_>, char_id: i64) -> Result<Option<(
                 .get(&[store::Value::Int(id), store::Value::Int(ATTR_SKILL_POINTS.into())])
                 .and_then(|a| a.float("valueFloat").or_else(|| a.float("valueInt")))
                 .unwrap_or(0.0);
-            Some((id, name, points, stc))
+            Some((id, type_id, name, points, stc))
         })
         .collect();
-    let total: f64 = skills.iter().map(|s| s.2).sum();
+    let total: f64 = skills.iter().map(|s| s.3).sum();
     if total <= saved {
         return Ok(None);
     }
-    let Some(biggest) = skills.iter().max_by(|a, b| a.2.total_cmp(&b.2)) else { return Ok(None) };
-    let (id, name, points, stc) = biggest.clone();
+    let Some(biggest) = skills.iter().max_by(|a, b| a.3.total_cmp(&b.3)) else { return Ok(None) };
+    let (id, type_id, name, points, stc) = biggest.clone();
     let lost = (total - saved).min(points);
     let left = points - lost;
     for (a, value) in [(ATTR_SKILL_POINTS, left), (ATTR_SKILL_LEVEL, level_of(stc, left) as f64)] {
@@ -607,6 +607,7 @@ fn lose_skill_points(txn: &mut ItemTxn<'_, '_>, char_id: i64) -> Result<Option<(
             &[("valueInt", store::Value::Null), ("valueFloat", store::Value::Float(value))],
         )?;
     }
+    crate::svc::skills::history::record(txn.tx(), char_id, type_id, crate::svc::skills::history::CLONE_PENALTY, crate::bulkdata::filetime_now(), left)?;
     info!("{char_id} lost {lost} skill points of {name} (clone keeps {saved}, had {total})");
     Ok(Some((name, lost)))
 }
@@ -788,320 +789,5 @@ async fn mail(server: &Server, store: &Store, to: i64, subject: &str, body: &str
     let body = body.replace('\n', "<br>");
     if let Err(e) = store.write(|tx| crate::svc::chat::deliver(tx, &server.world, OWNER_SYSTEM, &[to], subject, &body)) {
         error!("mailing {to}: {}", crate::logging::chain(&e));
-    }
-}
-
-/// Test fixtures shared by the loss tests.
-#[cfg(test)]
-mod fixture {
-    use super::*;
-
-    /// A server around a test store.
-    pub(super) fn server(f: crate::test_support::Database) -> Server {
-        Server {
-            table: Default::default(),
-            store: f.store,
-            node_id: 1,
-            bulk: f.bulk,
-            dogma: f.dogma,
-            services: crate::svc::registry(),
-            world: f.world,
-            dump_dir: Default::default(),
-            alliance_join_delay_secs: 0,
-            sov_claim_delay_secs: 0,
-        }
-    }
-
-    pub(super) fn int(v: impl Into<i64>) -> store::Value {
-        store::Value::Int(v.into())
-    }
-
-    /// An item row: (id, type, owner, location, flag, quantity), a
-    /// singleton or not, at a position.
-    pub(super) fn item(tx: &mut Tx<'_>, (id, type_id, owner, location, flag, quantity): (i64, i64, i64, i64, i64, i64), singleton: bool, at: (f64, f64, f64)) -> Result<(), StoreError> {
-        tx.insert(
-            "entity",
-            &[
-                ("itemID", int(id)),
-                ("typeID", int(type_id)),
-                ("ownerID", int(owner)),
-                ("locationID", int(location)),
-                ("flag", int(flag)),
-                ("quantity", int(quantity)),
-                ("singleton", int(singleton)),
-                ("x", store::Value::Float(at.0)),
-                ("y", store::Value::Float(at.1)),
-                ("z", store::Value::Float(at.2)),
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// A character with a balance, wherever `place` puts it: (ship, station,
-    /// solar system, constellation, region).
-    pub(super) fn character(tx: &mut Tx<'_>, id: i64, name: &str, corp: i64, (ship, station, system, constellation, region): (i64, i64, i64, i64, i64), balance: f64) -> Result<(), StoreError> {
-        tx.insert(
-            "character_",
-            &[
-                ("characterID", int(id)),
-                ("characterName", store::Value::Text(format!("{name} {id}").into())),
-                ("corporationID", int(corp)),
-                ("shipID", int(ship)),
-                ("stationID", int(station)),
-                ("solarSystemID", int(system)),
-                ("constellationID", int(constellation)),
-                ("regionID", int(region)),
-                ("balance", store::Value::Float(balance)),
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// A policy on `ship` paying 500 ISK to `owner`, in force from `start` to
-    /// `end`.
-    pub(super) fn insure(tx: &mut Tx<'_>, contract: i64, ship: i64, owner: i64, start: i64, end: i64) -> Result<(), StoreError> {
-        tx.insert(
-            "insuranceContracts",
-            &[
-                ("contractID", int(contract)),
-                ("shipID", int(ship)),
-                ("ownerID", int(owner)),
-                ("startDate", int(start)),
-                ("endDate", int(end)),
-                ("fraction", store::Value::Float(0.5)),
-                ("amount", store::Value::Float(100.0)),
-                ("payout", store::Value::Float(500.0)),
-                ("isCorp", int(0)),
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Make the next kill record fail (its ID is already taken), as a store
-    /// refusal partway through a settlement would; the settlement after it
-    /// gets the next ID.
-    pub(super) fn refuse_next_kill(store: &Store) {
-        store
-            .write(|tx| {
-                let next = tx.db().sequence("killLog_killID_seq").map_or(1, |v| v + 1);
-                tx.insert("killLog", &[("killID", int(next)), ("killTime", int(0)), ("solarSystemID", int(0))])
-            })
-            .unwrap();
-    }
-
-    /// An entity column of `id`, if the item is there.
-    pub(super) fn entity_int(store: &Store, id: i64, column: &str) -> Option<i64> {
-        store.read(|db| db.table("entity").get_id(id).and_then(|e| e.int(column)))
-    }
-
-    pub(super) fn exists(store: &Store, id: i64) -> bool {
-        store.read(|db| db.table("entity").get_id(id).is_some())
-    }
-
-    /// A character column read as a number.
-    pub(super) fn character_float(store: &Store, id: i64, column: &str) -> Option<f64> {
-        store.read(|db| db.table("character_").get_id(id).and_then(|c| c.float(column)))
-    }
-
-    pub(super) fn character_int(store: &Store, id: i64, column: &str) -> Option<i64> {
-        store.read(|db| db.table("character_").get_id(id).and_then(|c| c.int(column)))
-    }
-
-    /// Set columns of the row of `table` whose key is `id`.
-    pub(super) fn set(store: &Store, table: &str, id: i64, sets: store::Sets) {
-        store.write(|tx| update_id(tx, table, id, sets)).unwrap();
-    }
-
-    /// The fixture station's (station, system, constellation, region).
-    pub(super) fn station(store: &Store) -> (i64, i64, i64, i64) {
-        store.read(|db| {
-            let s = db.table("staStations").get_id(60014659).unwrap();
-            (60014659, s.int("solarSystemID").unwrap(), s.int("constellationID").unwrap(), s.int("regionID").unwrap())
-        })
-    }
-
-    /// The kill records of a hull.
-    pub(super) fn kills(store: &Store, ship: i64) -> usize {
-        store.read(|db| db.table("killLog").rows().filter(|k| k.int("victimItemID") == Some(ship)).count())
-    }
-
-    /// A fresh item ID.
-    pub(super) fn id(store: &Store) -> i64 {
-        store.write(|tx| tx.nextval("dyn_id_seq")).unwrap()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use super::fixture::{exists, int, kills};
-
-    #[tokio::test]
-    async fn derelict_losses_preserve_the_owner_and_occupied_losses_persist_capsule_position() {
-        let server=fixture::server(crate::test_support::Database::load().await);
-        let store=server.store.clone();
-        let system=30004971i64;
-        server.world.lock().parks.insert(system,crate::ballpark::Park::new(system,vec![],crate::destiny::tick_now()));
-        // Explicitly empty hull, stale occupied snapshot after owner left,
-        // and a genuinely occupied hull all share the same loss transaction.
-        for (case,unpiloted,elsewhere) in [(0,true,true),(1,false,true),(2,false,false)] {
-            let (owner,hull,old_pod,cargo)=(fixture::id(&store),fixture::id(&store),fixture::id(&store),fixture::id(&store));
-            let client=case+1;
-            let current=if elsewhere {old_pod} else {hull};
-            let current_system=if elsewhere {30000142i64} else {system};
-            store.write(|tx| {
-                tx.insert("character_",&[("characterID",int(owner)),("characterName",store::Value::Text(format!("Loss fixture {owner}").into())),
-                    ("shipID",int(current)),("solarSystemID",int(current_system)),("stationID",int(0)),("corporationID",int(1000002)),("balance",store::Value::Float(1000.0))])?;
-                for (id,kind,location,flag,quantity) in [(owner,1373,current_system,57,1),(hull,587,system,0,1),(cargo,34,hull,5,2)] {
-                    fixture::item(tx,(id,kind,owner,location,flag,quantity),true,(11.0,22.0,33.0))?;
-                }
-                if elsewhere {
-                    fixture::item(tx,(old_pod,670,owner,current_system,0,1),true,(11.0,22.0,33.0))?;
-                }
-                if unpiloted {
-                    let now=crate::bulkdata::filetime_now();
-                    fixture::insure(tx,hull,hull,owner,now-1,now+100_000_000)?;
-                }
-                Ok::<_,StoreError>(())
-            }).unwrap();
-            let pos=Vec3::new(987654321.25,-7654321.5,54321.75);
-            let mut ship=Ship::new(hull,client,crate::ballpark::ShipStats::new(37.0,1.1e6,3.1,320.0,2.0),
-                crate::ballpark::Pilot{type_id:587,group_id:25,name:"Lost hull".into(),char_id:owner,
-                    corp_id:1000002,alliance_id:None,security:0.0,bounty:0.0},pos,Vec3::ZERO);
-            ship.unpiloted=unpiloted;
-            let loss=Loss::of(&ship,system,false);
-            assert_eq!(loss.unpiloted,unpiloted);
-            let mut receiver={
-                let mut world=server.world.lock();
-                let rx=world.connect(client);
-                world.set_presence(client,Some(crate::world::Presence{char_id:owner,corp_id:1000002,
-                    solar_system_id:current_system,docked:false,station_id:None,role:0}));
-                world.sees(client,current_system);
-                rx
-            };
-            handle(&server,&store,loss.clone()).await;
-            let after=fixture::character_int(&store,owner,"shipID").unwrap();
-            assert_eq!(fixture::character_int(&store,owner,"solarSystemID"),Some(current_system));
-            assert_eq!(fixture::character_float(&store,owner,"balance"),Some(if unpiloted {1500.0} else {1000.0}));
-            let (location,pilot_pos)=store.read(|db| {
-                let e=db.table("entity").get_id(owner).unwrap();
-                (e.int("locationID").unwrap(),(e.float("x").unwrap(),e.float("y").unwrap(),e.float("z").unwrap()))
-            });
-            let mut moves=Vec::new();
-            while let Ok(push)=receiver.try_recv() { if let crate::world::Push::Move(m)=push { moves.push(m); } }
-            if elsewhere {
-                assert_eq!(after,old_pod,"owner's current cockpit is untouched");
-                assert_eq!(location,current_system);
-                assert_eq!(pilot_pos,(11.0,22.0,33.0));
-                assert!(moves.is_empty(),"an abandoned hull cannot change its owner's session");
-            } else {
-                assert_ne!(after,hull);
-                assert_eq!(location,system);
-                assert_eq!(pilot_pos,pos.tuple());
-                assert_eq!(moves,vec![Move::ShipLost{ship_id:after}]);
-                let capsule=store.read(|db| {
-                    let e=db.table("entity").get_id(after).unwrap();
-                    (e.int("typeID").unwrap(),e.int("locationID").unwrap(),(e.float("x").unwrap(),e.float("y").unwrap(),e.float("z").unwrap()))
-                });
-                assert_eq!(capsule,(670,system,pos.tuple()));
-                assert_eq!(server.world.lock().parks[&system].ships[&after].pos,pos);
-            }
-            let capsules=store.read(|db| db.table("entity").find(&["ownerID"],&[int(owner)]).filter(|e| e.int("typeID")==Some(670)).count());
-            assert_eq!(capsules,1);
-            assert!(!exists(&store,hull));
-            let blob=store.read(|db| db.table("killLog").rows().find(|k| k.int("victimItemID")==Some(hull)).and_then(|k| k.text("killBlob").map(str::to_string))).unwrap();
-            assert!(blob.contains(r#"<i t="34" f="5""#),"cargo remains in the destruction report: {blob}");
-            handle(&server,&store,loss).await;
-            assert_eq!(kills(&store,hull),1);
-            assert!(receiver.try_recv().is_err(),"duplicate destruction has no repeated effects");
-        }
-    }
-
-    #[tokio::test]
-    async fn insurance_payout_rolls_back_expires_and_settles_once() {
-        let store = crate::test_support::store();
-        let (owner, ship) = (fixture::id(&store), fixture::id(&store));
-        let now = crate::bulkdata::filetime_now();
-        let add = |contract: i64, target: i64, recipient: i64, end: i64| {
-            store.write(|tx| fixture::insure(tx, contract, target, recipient, now - 100, end)).unwrap();
-        };
-        store.write(|tx| tx.insert("character_", &[("characterID", int(owner)), ("characterName", store::Value::Text(format!("Insured {owner}").into())), ("balance", store::Value::Float(1000.0))])).unwrap();
-        let balance = || fixture::character_float(&store, owner, "balance");
-        let policy = |target: i64| store.read(|db| db.table("insuranceContracts").find_one(&["shipID"], &[int(target)]).is_some());
-        add(fixture::id(&store), ship, owner, now + 100_000_000);
-        // A claim in a transaction that fails is not kept.
-        let undone = store.write(|tx| -> Result<(), StoreError> {
-            assert_eq!(claim_insurance(tx, ship, now)?.unwrap().payout, 500.0);
-            Err(StoreError { code: store::DATA_EXCEPTION, message: "the loss failed".into() })
-        });
-        assert!(undone.is_err());
-        assert_eq!(balance(), Some(1000.0));
-        let claim = || store.write(|tx| claim_insurance(tx, ship, now)).unwrap().is_some();
-        let (a, b) = (claim(), claim());
-        assert_ne!(a, b);
-        assert_eq!(balance(), Some(1500.0));
-        let expired = fixture::id(&store);
-        add(fixture::id(&store), expired, owner, now);
-        assert!(store.write(|tx| claim_insurance(tx, expired, now)).unwrap().is_none());
-        assert!(!policy(expired));
-        let missing_owner = fixture::id(&store);
-        add(fixture::id(&store), missing_owner, missing_owner, now + 100_000_000);
-        assert!(store.write(|tx| claim_insurance(tx, missing_owner, now)).unwrap().is_none());
-        assert!(policy(missing_owner));
-    }
-
-    #[tokio::test]
-    async fn nested_loss_destroys_contents_and_records_actual_survivors() {
-        let store = crate::test_support::store();
-        let pilot = fixture::id(&store);
-        let (ship, doomed, nested, cargo, module, charge) = store
-            .write(|tx| {
-                let mut txn = ItemTxn::new(tx);
-                let ship = txn.create(NewItem {type_id:606,owner_id:pilot,location_id:30004971,flag:0,quantity:1,singleton:true})?;
-                let doomed = txn.create(NewItem {type_id:3293,owner_id:pilot,location_id:ship,flag:5,quantity:1,singleton:true})?;
-                let nested = txn.create(NewItem {type_id:3293,owner_id:pilot,location_id:doomed,flag:5,quantity:1,singleton:true})?;
-                let cargo = txn.create(NewItem {type_id:34,owner_id:pilot,location_id:nested,flag:5,quantity:12,singleton:false})?;
-                let module = txn.create(NewItem {type_id:484,owner_id:pilot,location_id:ship,flag:27,quantity:1,singleton:true})?;
-                let charge = txn.create(NewItem {type_id:230,owner_id:pilot,location_id:module,flag:0,quantity:20,singleton:false})?;
-                txn.tx().insert("entity_attributes", &[("itemID", int(cargo)), ("attributeID", int(3)), ("valueInt", int(1))])?;
-                Ok::<_, StoreError>((ship, doomed, nested, cargo, module, charge))
-            })
-            .unwrap();
-        let loss = Loss {client_id:1,char_id:pilot,ship_id:ship,ship_type:606,system:30004971,pos:Vec3::ZERO,arrival_custody:None,capsule:false,unpiloted:false,final_blow:None,attackers:vec![],items:vec![]};
-        let xml = store
-            .write(|tx| {
-                let mut txn = ItemTxn::new(tx);
-                let before = item_snapshot(txn.db(),&loss);
-                assert_eq!(before.len(),5);
-                destroy_tree(&mut txn,doomed,ship,pilot)?;
-                txn.move_to(module,30004971,0)?;
-                Ok::<_, StoreError>(item_blob(txn.db(),&before))
-            })
-            .unwrap();
-        let remaining: Vec<i64> = [doomed,nested,cargo,module,charge].into_iter().filter(|id| exists(&store,*id)).collect();
-        assert_eq!(remaining,vec![module,charge]);
-        assert_eq!(store.read(|db| db.table("entity_attributes").find(&["itemID"],&[int(cargo)]).count()),0);
-        // A looter may immediately merge this dropped stack into another.
-        // The already captured report must retain the actual drop outcome.
-        store.write(|tx| ItemTxn::new(tx).destroy(charge)).unwrap();
-        assert!(xml.contains(r#"<i t="3293" f="5" d="0" x="1"><i t="3293" f="5" d="0" x="1"><i t="34" f="5" d="0" x="12">"#),"{xml}");
-        assert!(xml.contains(r#"<i t="484" f="27" d="1" x="0"><i t="230" f="0" d="20" x="0">"#),"{xml}");
-    }
-
-    #[test]
-    fn levels_follow_the_skill_curve() {
-        let stc = 250.0;
-        assert_eq!(points_at(stc, 1), 250.0);
-        assert!((points_at(stc, 2) - 1_414.21).abs() < 0.01);
-        assert_eq!(level_of(stc, 0.0), 0);
-        assert_eq!(level_of(stc, 250.0), 1);
-        assert_eq!(level_of(stc, 1_414.0), 1);
-        assert_eq!(level_of(stc, 256_000.0), 5);
-    }
-
-    #[test]
-    fn days_become_dates() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(20_390), (2025, 10, 29));
     }
 }

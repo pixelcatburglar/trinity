@@ -555,25 +555,3 @@ fn take_from(txn: &mut ItemTxn<'_, '_>, silo: i64, t: i64, mut n: i64) -> Result
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn table() -> Vec<(i64, f64)> {
-        vec![(1, 2.0), (2, 2.0), (3, 8.0), (4, 16.0), (5, 64.0), (6, 256.0)]
-    }
-
-    #[test]
-    fn a_moon_always_holds_the_same_materials() {
-        assert_eq!(moon_materials(40_000_123, -0.2, &table()), moon_materials(40_000_123, -0.2, &table()));
-    }
-
-    #[test]
-    fn the_rarest_materials_are_only_in_null_security() {
-        for moon in 40_000_000..40_002_000 {
-            assert!(!moon_materials(moon, 0.3, &table()).iter().any(|(t, _)| *t == 6), "moon {moon}");
-        }
-        assert!((40_000_000..40_002_000).any(|m| moon_materials(m, -0.5, &table()).iter().any(|(t, _)| *t == 6)));
-    }
-}

@@ -225,6 +225,13 @@
    "max": 9223372036854775807
   },
   {
+   "name": "skillHistory_logID_seq",
+   "start": 1,
+   "increment": 1,
+   "min": 1,
+   "max": 9223372036854775807
+  },
+  {
    "name": "standingTransactions_eventID_seq",
    "start": 1,
    "increment": 1,
@@ -10062,6 +10069,56 @@
       "itemID"
      ],
      "onDelete": "cascade"
+    }
+   ]
+  },
+  {
+   "name": "skillHistory",
+   "columns": [
+    {
+     "name": "logID",
+     "type": "bigint",
+     "notNull": true,
+     "default": {
+      "seq": "skillHistory_logID_seq"
+     }
+    },
+    {
+     "name": "characterID",
+     "type": "integer",
+     "notNull": true
+    },
+    {
+     "name": "skillTypeID",
+     "type": "integer",
+     "notNull": true
+    },
+    {
+     "name": "eventID",
+     "type": "integer",
+     "notNull": true
+    },
+    {
+     "name": "logDateTime",
+     "type": "bigint",
+     "notNull": true
+    },
+    {
+     "name": "absolutePoints",
+     "type": "double",
+     "notNull": true
+    }
+   ],
+   "primaryKey": [
+    "logID"
+   ],
+   "indexes": [
+    {
+     "name": "skillHistory_character",
+     "columns": [
+      "characterID",
+      "logID"
+     ]
     }
    ]
   }

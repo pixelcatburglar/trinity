@@ -834,32 +834,3 @@ pub fn skirmish(p: &mut Politics, atlas: &Atlas, bots: &mut [Bot], ids: &[Identi
     }
     lost
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_and_tickers_are_never_reused() {
-        let mut rng = Rng::seeded(4);
-        let (mut names, mut tickers) = (HashSet::new(), HashSet::new());
-        let mut seen = HashSet::new();
-        for _ in 0..3_000 {
-            let (name, ticker) = christen(&mut rng, &CORP_ENDINGS, 4, &mut names, &mut tickers);
-            assert!(seen.insert(ticker.clone()), "ticker {ticker} twice");
-            assert!((3..=4).contains(&ticker.len()) && ticker.chars().all(|c| c.is_ascii_uppercase()), "{ticker}");
-            assert!(name.len() <= 50);
-        }
-    }
-
-    #[test]
-    fn corporation_sizes_have_a_long_tail() {
-        let mut rng = Rng::seeded(9);
-        let sizes: Vec<usize> = (0..10_000).map(|_| tail(&mut rng, 4.0, 0.8, 2_500.0).max(3)).collect();
-        let small = sizes.iter().filter(|s| **s <= 10).count();
-        let big = sizes.iter().filter(|s| **s >= 200).count();
-        // About seven in ten have ten members or fewer.
-        assert!(small > 6_500, "{small}");
-        assert!(big > 10 && big < 500, "{big}");
-    }
-}

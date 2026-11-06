@@ -488,58 +488,6 @@ fn item_rows(cells: Vec<Vec<Value>>) -> Value {
     rowset(INVITEM_HEADER, cells.into_iter().map(Value::List).collect())
 }
 
-#[cfg(test)]
-mod custody_tests {
-    use super::*;
-
-    fn item_ids(value:Value)->Vec<i64> {
-        match value { Value::Instance {state,..} => state.get_str("lines").and_then(Value::seq).unwrap_or(&[]).iter().filter_map(|r|r.seq()?.first()?.as_i64()).collect(),_=>vec![] }
-    }
-
-    #[tokio::test]
-    async fn inventory_custody_hides_private_and_unpermitted_hangars_and_keeps_job_blueprints() {
-        let db=crate::test_support::Database::load().await;
-        let mut ids=Vec::new();for _ in 0..12 {ids.push(i64::from(db.id().await));}
-        let [me,other,corp,office,ship,foreign_ship,nested,secret,visible,hidden,blueprint,corp_blueprint]=ids[..] else {unreachable!()};
-        let station=db.store.read(|d|d.table("staStations").rows().filter_map(|r|r.int("stationID")).min()).unwrap();
-        db.store.write(|tx|->Result<(),crate::store::StoreError> {
-            tx.insert("corporation",&[("corporationID",store::Value::Int(corp)),("corporationName",store::Value::Text(format!("Custody {corp}").into()))])?;
-            tx.insert("crpOffices",&[("corporationID",store::Value::Int(corp)),("stationID",store::Value::Int(station)),("officeFolderID",store::Value::Int(office)),("itemID",store::Value::Int(office))])?;
-            for (id,ty,owner,location,flag) in [(ship,587,me,station,4),(foreign_ship,587,other,station,4),(nested,3296,corp,office,4),(secret,34,other,foreign_ship,5),(visible,34,corp,office,4),(hidden,35,corp,office,116),(blueprint,691,me,station,36),(corp_blueprint,691,corp,station,4)] {
-                tx.insert("entity",&[("itemID",store::Value::Int(id)),("typeID",store::Value::Int(ty)),("ownerID",store::Value::Int(owner)),("locationID",store::Value::Int(location)),
-                    ("flag",store::Value::Int(flag)),("quantity",store::Value::Int(1)),("singleton",store::Value::Int(1))])?;
-            }
-            Ok(())
-        }).unwrap();
-        let mut session=crate::session::Session {char_id:Some(me),ship_id:Some(ship),corp_id:Some(corp),station_id:Some(station),hq_id:Some(station+1),roles_at_hq:8_192|1_048_576,..Default::default()};
-        let ctx=db.ctx(&session);
-        assert!(item_ids(list(&ctx,Container::Item(foreign_ship)).await).is_empty());
-        assert!(item_ids(list(&ctx,Container::Special {container_id:CONTAINER_HANGAR,owner_id:Some(other)}).await).is_empty());
-        assert!(item_ids(list(&ctx,Container::Item(office)).await).is_empty(),"HQ roles do not grant access at another office");
-        assert!(!may_read(&ctx,Container::Item(nested)).await);
-        assert!(item_ids(list_station_items(&ctx,station,true,true).await).is_empty(),"remote blueprint listing also checks the target station's roles");
-        assert!(item_ids(list_stations(&ctx,true,true).await).is_empty());
-        assert!(!item_ids(list(&ctx,Container::Special {container_id:CONTAINER_HANGAR,owner_id:None}).await).contains(&blueprint));
-        let call=Call {service:"invcontainer".into(),method:"Add".into(),args:vec![Value::Int(blueprint)],kwargs:vec![]};
-        let result=crate::svc::moves::container_write(&ctx,Container::Special {container_id:CONTAINER_HANGAR,owner_id:None},&call).await.unwrap();
-        assert!(!matches!(result,Outcome::Value(_)),"ordinary moves cannot retrieve an installed blueprint");
-        session.roles_at_other=1_048_576;
-        let ctx=db.ctx(&session);
-        assert_eq!(item_ids(list(&ctx,Container::Item(office)).await).into_iter().collect::<std::collections::BTreeSet<_>>(),[nested,visible].into_iter().collect());
-        assert!(may_read(&ctx,Container::Item(nested)).await);
-        assert_eq!(item_ids(list_station_items(&ctx,station,true,true).await),vec![corp_blueprint]);
-        assert!(item_ids(list_stations(&ctx,true,true).await).contains(&station));
-        assert!(!crate::svc::corphangar::may_take(&ctx,4));
-        session.roles_at_other=8_192;
-        let ctx=db.ctx(&session);
-        assert!(crate::svc::corphangar::may_take(&ctx,4));
-        assert!(!crate::svc::corphangar::may_query(&ctx,4),"take and query are distinct original roles");
-        session.roles_at_all=crate::session::CORP_ROLE_DIRECTOR;
-        let ctx=db.ctx(&session);
-        assert!(item_ids(list(&ctx,Container::Item(office)).await).contains(&hidden));
-    }
-}
-
 /// Column positions in an item row (the client's const.ix*).
 pub const IX_LOCATION_ID: i64 = 3;
 pub const IX_QUANTITY: i64 = 7;

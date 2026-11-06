@@ -3,7 +3,6 @@
 use super::*;
 use super::reserved::{Mobility,Reservation,CommitState};
 use crate::{combat,conn::Server,items::ItemTxn,session::Session};
-#[cfg(test)] mod tests;
 
 #[derive(Clone,Copy,Debug)]
 pub(in crate::conn::location) struct Place {

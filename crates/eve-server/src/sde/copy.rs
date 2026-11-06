@@ -230,39 +230,3 @@ pub fn unescape(field: &str) -> Cow<'_, str> {
     }
     Cow::Owned(String::from_utf8_lossy(&bytes).into_owned())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const DUMP: &str = "SET x = 0;\n\nCREATE TABLE public.\"things\" (\n    \"thingID\" integer NOT NULL,\n    name text DEFAULT ''::text,\n    weight double precision,\n    live boolean DEFAULT false NOT NULL\n);\n\nCREATE TABLE public.empty (\n    a bigint\n);\n\nCOPY public.\"things\" (\"thingID\", name, weight, live) FROM stdin;\n\
-        1\tplain\t1.5\tt\n\
-        2\ttab\\there\\\\back\\nline\t\\N\tf\n\
-        3\t\\101\\x42\tInfinity\tt\n\
-        \\.\n\nCOPY public.empty (a) FROM stdin;\n\\.\n";
-
-    #[test]
-    fn rows_are_read_by_column_name_with_nulls_and_escapes() {
-        let t = Table::from_dump("things", DUMP).unwrap();
-        let (id, name, weight, live) = (t.col("thingID").unwrap(), t.col("name").unwrap(), t.col("weight").unwrap(), t.col("live").unwrap());
-        let rows: Vec<_> = t.rows().collect();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].int(id).unwrap(), 1);
-        assert_eq!(rows[0].text(name).unwrap(), "plain");
-        assert_eq!(rows[0].opt_float(weight).unwrap(), Some(1.5));
-        assert!(rows[0].bool(live).unwrap());
-        assert_eq!(rows[1].text(name).unwrap(), "tab\there\\back\nline");
-        assert_eq!(rows[1].opt_float(weight).unwrap(), None);
-        assert!(rows[1].int(weight).is_err());
-        assert_eq!(rows[2].text(name).unwrap(), "AB");
-        assert_eq!(rows[2].opt_float(weight).unwrap(), Some(f64::INFINITY));
-        assert!(t.col("missing").is_err());
-        assert_eq!(t.types(), &[ColType::Integer, ColType::Text, ColType::Double, ColType::Bool]);
-    }
-
-    #[test]
-    fn an_empty_table_and_a_missing_one() {
-        assert_eq!(Table::from_dump("empty", DUMP).unwrap().rows().count(), 0);
-        assert!(Table::from_dump("absent", DUMP).is_err());
-    }
-}

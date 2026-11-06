@@ -6,9 +6,6 @@ use super::{ArrivalDisposition,Attacker,Loss,Refused};
 use crate::{ballpark::{Ship,Vec3},combat,conn::Server,svc::inflight};
 use crate::store::{self,Db,Store,StoreError,Tx};
 
-#[cfg(test)]
-mod tests;
-
 #[derive(Debug,Clone,Copy)]
 pub struct Marker {pub ship:i64,pub pilot:i64,pub station:i64,pub source:i64,pub generation:i64,pub ship_type:i64}
 

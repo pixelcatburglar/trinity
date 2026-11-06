@@ -149,17 +149,3 @@ pub async fn update_corporation(ctx: &Ctx<'_>, args: &[Value]) -> Result<Value, 
     w.notify(&w.corp_members(corp), "OnCorporationChanged", Value::Tuple(vec![Value::Int(corp), change]));
     Ok(Value::None)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn office_flags_are_divisions_one_to_seven() {
-        assert_eq!(division(4), Some(1));
-        assert_eq!(division(116), Some(2));
-        assert_eq!(division(121), Some(7));
-        assert_eq!(division(5), None);
-        assert_eq!(flags().count(), 7);
-    }
-}

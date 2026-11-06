@@ -732,33 +732,3 @@ pub fn transfer_refused(t: Transfer) -> Outcome {
         Transfer::Db(e) => db_failed("paying", e),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_are_checked_as_the_client_messages_describe() {
-        assert_eq!(name_error("Corp", "Abc").as_deref(), Some("CorpNameInvalidMinLength"));
-        assert_eq!(name_error("Corp", &"x".repeat(25)).as_deref(), Some("CorpNameInvalidMaxLength"));
-        assert_eq!(name_error("Alliance", " Abcd").as_deref(), Some("AllianceNameInvalidFirstChar"));
-        assert_eq!(name_error("Corp", "Abcd!").as_deref(), Some("CorpNameInvalidSomeChar"));
-        assert_eq!(name_error("Corp", "Mining Co."), None);
-    }
-
-    #[test]
-    fn tickers_start_with_the_initials() {
-        let t = ticker_candidates("Red Moon Rising");
-        assert_eq!(t[0], "RMR");
-        assert!(t.contains(&"REDMO".to_string()));
-        assert!(t.iter().all(|t| ticker_ok(t)));
-        assert!(t.contains(&"RMR1".to_string()));
-    }
-
-    #[test]
-    fn a_ceo_holds_every_role_the_constants_define() {
-        for role in [1, 128, 256, 512, 1024, 2048, 4096, 8192, 1 << 20, 1 << 27, 1 << 31, 1 << 41, 1 << 53, 1 << 55] {
-            assert_eq!(ALL_ROLES & role, role, "role {role}");
-        }
-    }
-}

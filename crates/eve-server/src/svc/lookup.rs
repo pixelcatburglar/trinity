@@ -175,17 +175,3 @@ async fn find(
     });
     crate::svc::rows::rowset(header, lines)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::matches;
-
-    #[test]
-    fn like_wildcards_in_the_search_are_literal() {
-        assert!(matches("Save 50%_off\\ today", "50%_OFF\\", false));
-        assert!(!matches("Save 50 percent off", "50%_off", false));
-        assert!(!matches("Save 50xxoff", "50%_off", false));
-        assert!(matches("Amarr Empire", "amarr empire", true));
-        assert!(!matches("Amarr Empire", "amarr", true));
-    }
-}

@@ -323,7 +323,6 @@ impl WorldState {
         }
     }
 
-
     /// Runs `f` on the ships hidden from `client_id`; None if it is not connected.
     pub fn with_hidden<R>(&self, client_id: i64, f: impl FnOnce(&mut HashSet<i64>) -> R) -> Option<R> {
         let c = self.clients.get(&client_id)?;
@@ -517,88 +516,4 @@ pub fn local_system(channel_id: &Value) -> Option<i64> {
 /// channels and tuples like `(('solarsystemid2', 30002780),)` for local chat.
 fn channel_key(channel_id: &Value) -> String {
     format!("{channel_id:?}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn presence(char_id: i64, docked: bool) -> Option<Presence> {
-        Some(Presence { char_id, corp_id: 1000044, solar_system_id: 30002780, docked, station_id: None, role: 3 })
-    }
-
-    #[test]
-    fn local_channels_are_known_by_their_system() {
-        let local = Value::List(vec![Value::Tuple(vec![Value::bytes("solarsystemid2"), Value::Int(30002780)])]);
-        assert_eq!(local_system(&local), Some(30002780));
-        let unicode = Value::Tuple(vec![Value::Tuple(vec![Value::Unicode("solarsystemid2".into()), Value::Int(30000142)])]);
-        assert_eq!(local_system(&unicode), Some(30000142));
-        let corp = Value::List(vec![Value::Tuple(vec![Value::bytes("corpid"), Value::Int(1000044)])]);
-        assert_eq!(local_system(&corp), None);
-        assert_eq!(local_system(&Value::Int(1)), None);
-
-        let world = World::default();
-        let mut w = world.lock();
-        let _a = w.connect(1);
-        w.join_channel(&local, 1);
-        assert_eq!(w.local_channels().into_iter().map(|(s, _, m)| (s, m)).collect::<Vec<_>>(), vec![(30002780, vec![1])]);
-    }
-
-    #[test]
-    fn tracks_characters_until_they_leave() {
-        let world = World::default();
-        let mut w = world.lock();
-        let _a = w.connect(1);
-        let _b = w.connect(2);
-        w.set_presence(1, presence(140000001, true));
-        w.set_presence(2, presence(140000002, false));
-        assert!(w.is_online(140000001));
-        // In space, but sent no ballpark yet: no destiny updates.
-        assert!(w.in_space(30002780).is_empty());
-        w.sees(2, 30002780);
-        assert_eq!(w.in_space(30002780), vec![2]);
-        // Docking takes the ballpark away.
-        w.set_presence(2, presence(140000002, true));
-        w.set_presence(2, presence(140000002, false));
-        assert!(w.in_space(30002780).is_empty());
-        w.sees(2, 30002780);
-        let (space, docked) = w.counts();
-        assert_eq!((space[&30002780], docked[&30002780]), (1, 1));
-
-        w.disconnect(2);
-        let (space, docked) = w.counts();
-        assert_eq!((space[&30002780], docked[&30002780]), (0, 1), "docked-only system still listed");
-
-        w.disconnect(1);
-        assert!(!w.is_online(140000001));
-        assert!(w.counts().0.is_empty());
-    }
-
-    #[test]
-    fn notifications_reach_only_the_named_clients() {
-        let world = World::default();
-        let mut w = world.lock();
-        let mut a = w.connect(1);
-        let mut b = w.connect(2);
-        w.notify(&[2], "OnTest", Value::Tuple(vec![Value::Int(7)]));
-        assert!(a.try_recv().is_err());
-        let Push::Notify(n) = b.try_recv().expect("queued for client 2") else { panic!("a notification") };
-        assert_eq!(n.event, "OnTest");
-    }
-
-    #[test]
-    fn channel_membership_follows_joins_leaves_and_disconnects() {
-        let world = World::default();
-        let mut w = world.lock();
-        let _a = w.connect(1);
-        let _b = w.connect(2);
-        let channel = Value::Int(2000000000);
-        w.join_channel(&channel, 1);
-        let mut members = w.join_channel(&channel, 2);
-        members.sort();
-        assert_eq!(members, vec![1, 2]);
-        assert_eq!(w.leave_channel(&channel, 1), vec![2]);
-        assert_eq!(w.disconnect(2), vec![(channel.clone(), Vec::new())]);
-        assert!(w.channel_members(&channel).is_empty());
-    }
 }

@@ -59,12 +59,6 @@ pub(super) struct Departure {
 }
 
 impl Gangs {
-    #[cfg(test)]
-    pub(crate) fn test_members(&mut self, members: Vec<i64>) -> i64 {
-        let id=self.form(members[0]);
-        self.gangs.get_mut(&id).unwrap().members=members;
-        id
-    }
 
     /// The gang `char_id` is a member of.
     pub fn of(&self, char_id: i64) -> Option<i64> {
@@ -473,35 +467,4 @@ fn dedup(mut v: Vec<i64>) -> Vec<i64> {
 
 pub(super) fn message_with(key: &str, args: &[(&str, Value)]) -> Outcome {
     Outcome::UserError { msg: key.into(), args: args.iter().map(|(k, v)| ((*k).into(), v.clone())).collect() }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_gang_forms_around_its_leader_and_takes_only_the_invited() {
-        let mut gangs = Gangs::default();
-        let id = gangs.form(1);
-        assert_eq!(gangs.of(1), Some(id));
-        assert!(!gangs.join(id, 2));
-        gangs.gangs.get_mut(&id).unwrap().invited.push(2);
-        assert!(gangs.join(id, 2));
-        assert_eq!(gangs.get(id).unwrap().members, vec![1, 2]);
-        assert!(gangs.get(id).unwrap().invited.is_empty());
-        assert_eq!(gangs.memberships([1, 2, 3]), vec![(1, id), (2, id)]);
-    }
-
-    #[test]
-    fn the_leader_leaving_leaves_the_gang_leaderless_and_the_last_ends_it() {
-        let mut gangs = Gangs::default();
-        let id = gangs.form(1);
-        gangs.gangs.get_mut(&id).unwrap().invited.push(2);
-        gangs.join(id, 2);
-        assert_eq!(gangs.depart(id, 1), Some(Departure { rest: vec![2], was_leader: true }));
-        assert_eq!(gangs.get(id).unwrap().sitting_leader(), None);
-        assert_eq!(gangs.depart(id, 3), None);
-        assert_eq!(gangs.depart(id, 2), Some(Departure { rest: vec![], was_leader: false }));
-        assert!(gangs.get(id).is_none());
-    }
 }

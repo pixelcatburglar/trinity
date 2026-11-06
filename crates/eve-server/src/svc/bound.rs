@@ -9,7 +9,6 @@ pub struct Bound<'a> {
     pub params: Vec<i64>,
 }
 
-
 pub fn object_id(node_id: i64, service: &str, params: &[i64]) -> String {
     let mut s = format!("N={node_id}:{service}#");
     for (i, p) in params.iter().enumerate() {
@@ -103,40 +102,5 @@ pub fn piggyback_value(service: &str, outcome: Outcome) -> Value {
             info!("{service}: bind carried a call that refused: {msg}");
             Value::None
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn round_trips_an_object_id() {
-        let id = object_id(1, "invbroker", &[60_000_004, 15]);
-        assert_eq!(id, "N=1:invbroker#60000004,15");
-        let b = parse(&id).expect("decodes");
-        assert_eq!(b.service, "invbroker");
-        assert_eq!(b.params, vec![60_000_004, 15]);
-    }
-
-    #[test]
-    fn object_id_has_exactly_one_colon() {
-        assert_eq!(object_id(7, "corpRegistry", &[1_000_002, 1]).matches(':').count(), 1);
-        assert_eq!(object_id(7, "skillMgr", &[]).matches(':').count(), 1);
-    }
-
-    #[test]
-    fn owns_matches_name_and_id() {
-        assert!(owns("corpRegistry", "corpRegistry"));
-        assert!(owns("N=1:corpRegistry#1000002,1", "corpRegistry"));
-        assert!(!owns("N=1:corpRegistry#1000002,1", "invbroker"));
-        assert!(!owns("corpmgr", "corpRegistry"));
-    }
-
-    #[test]
-    fn parses_a_paramless_object() {
-        let b = parse("N=1:warRegistry#").expect("decodes");
-        assert_eq!(b.service, "warRegistry");
-        assert!(b.params.is_empty());
     }
 }

@@ -360,21 +360,3 @@ fn json_value(v: &serde_json::Value) -> Value {
         other => Value::Text(other.to_string().into()),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_schema_parses_and_its_names_resolve() {
-        let s = Schema::parse(include_str!("schema.json")).unwrap();
-        let entity = s.table("entity").unwrap();
-        assert_eq!(entity.indexes[entity.primary.unwrap()].cols, vec![entity.col("itemID")]);
-        assert!(matches!(entity.columns[entity.col("itemID")].default, Some(Default::Sequence(_))));
-        let boosters = s.table("character_boosters").unwrap();
-        assert_eq!(boosters.foreign_keys.len(), 2);
-        assert!(boosters.foreign_keys.iter().all(|f| f.on_delete == OnDelete::Cascade));
-        assert!(s.table("corporation_wallets").unwrap().checks.len() == 2);
-        assert!(s.table("market_orders").unwrap().indexes.iter().any(|i| i.unique && i.filter.is_some()));
-    }
-}

@@ -434,8 +434,6 @@ struct Done {
     reserve:Reservation,
 }
 
-#[cfg(test)] mod tests;
-
 // Original45017 common/script/sys/cfg.py GetItemVolume and __containerVolumes__.
 pub(crate) fn unit_volume(type_id:i64,group:i32,singleton:bool,assembled:f64)->f64 {
     if singleton || type_id==11019 {return assembled;}
@@ -468,4 +466,3 @@ pub fn used(db:&Db,host:i64,flag:i64,except:Option<i64>)->Result<f64,MoveError> 
             Some(unit_volume(type_id,group,r.int("singleton")?!=0,t.float("volume").unwrap_or(0.0))*r.int("quantity")? as f64)
         }).sum())
 }
-

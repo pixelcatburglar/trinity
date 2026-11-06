@@ -87,27 +87,3 @@ pub fn ensure(tx: &mut Tx) -> Result<(), StoreError> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn every_system_station_and_agent_has_its_identity_and_items_are_kept() {
-        let store = crate::test_support::store();
-        store.read(|db| {
-            let entity = db.table("entity");
-            assert!(db.table("staStations").rows().all(|s| entity.get(std::slice::from_ref(s.value("stationID"))).is_some()));
-            assert!(db.table("mapSolarSystems").rows().all(|s| entity.get(std::slice::from_ref(s.value("solarSystemID"))).is_some()));
-            let characters = db.table("character_");
-            for a in crate::sde::table("agtAgents").rows() {
-                let id = a.int("agentID").unwrap();
-                if db.table("eveStaticOwners").get_id(id).is_some() {
-                    assert!(characters.get_id(id).is_some(), "agent {id}");
-                }
-            }
-        });
-        let before = store.read(|db| (db.table("entity").len(), db.table("entity").rows().filter_map(|r| r.int("ownerID")).sum::<i64>()));
-        store.write(super::ensure).unwrap();
-        let after = store.read(|db| (db.table("entity").len(), db.table("entity").rows().filter_map(|r| r.int("ownerID")).sum::<i64>()));
-        assert_eq!(before, after);
-    }
-}

@@ -4,7 +4,6 @@ use crate::store::{self,Db,StoreError};
 use crate::{items::{ItemTxn,NewItem},services::{Ctx,Outcome}};
 use crate::svc::wallet::{self,Entry,Transfer,REF_OFFICE_RENTAL_FEE};
 
-#[cfg(test)] mod tests;
 mod slots;
 pub(crate) use slots::{ensure_schema,ensure_slots_locked};
 

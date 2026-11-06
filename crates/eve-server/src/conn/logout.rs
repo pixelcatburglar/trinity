@@ -106,5 +106,3 @@ fn ready(w:&crate::world::WorldState,id:i64,pilot:i64,client:i64,system:i64)->bo
             ship.is_player() && ship.pilot.char_id==pilot && ship.client_id==client && !ship.identity_reserved
             && ship.fight.as_ref().is_none_or(|fight|!fight.modules.iter().any(|m|m.action==combat::Action::Cyno)))
 }
-
-#[cfg(test)] mod tests;

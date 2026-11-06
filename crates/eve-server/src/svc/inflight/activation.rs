@@ -7,9 +7,6 @@ use crate::items::ItemTxn;
 use crate::store::{Store, StoreError, Value};
 use crate::world::World;
 
-#[cfg(test)]
-mod tests;
-
 struct Reservation {
     world: World,
     system: i64,

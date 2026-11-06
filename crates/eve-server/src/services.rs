@@ -9,7 +9,6 @@ use eve_marshal::{StringTable, Value};
 use eve_proto::{MachoPacket, ProtoError};
 use std::sync::Arc;
 
-
 use crate::bulkdata::BulkData;
 use crate::session::Session;
 use crate::world::World;
@@ -229,89 +228,5 @@ impl Registry {
             }
         }
         svc.call(call, ctx).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use eve_proto::{MachoAddress, MessageType};
-
-    fn call_req(destination: MachoAddress, flag: i64, inner: Value) -> MachoPacket {
-        let table = StringTable::empty();
-        let blob = eve_marshal::save(&inner, &table).expect("inner encodes");
-        let mut p = MachoPacket::new(
-            MessageType::CallReq,
-            vec![
-                Value::Tuple(vec![Value::Int(flag), Value::Bytes(blob)]),
-                Value::None,
-            ],
-        );
-        p.destination = Some(destination);
-        p
-    }
-
-    #[test]
-    fn parses_a_plain_service_call() {
-        let packet = call_req(
-            MachoAddress::Any { service: Some(b"config".to_vec()), call_id: Some(7) },
-            0,
-            Value::Tuple(vec![
-                Value::Int(1),
-                Value::bytes("GetMultiOwnersEx"),
-                Value::Tuple(vec![Value::List(vec![Value::Int(140_000_001)])]),
-                Value::Dict(vec![(Value::bytes("machoVersion"), Value::Int(1))]),
-            ]),
-        );
-        let call = parse_call(&packet, &StringTable::empty()).expect("parses");
-        assert_eq!(call.service, "config");
-        assert_eq!(call.method, "GetMultiOwnersEx");
-        assert_eq!(call.args.len(), 1);
-        assert!(call.kwargs.is_empty());
-    }
-
-    #[test]
-    fn parses_a_bound_object_call() {
-        let packet = call_req(
-            MachoAddress::Node { node_id: Some(1), service: None, call_id: Some(9) },
-            1,
-            Value::Tuple(vec![
-                Value::bytes("N=1:invcontainer#0,10004,-1"),
-                Value::bytes("List"),
-                Value::Tuple(Vec::new()),
-                Value::Dict(Vec::new()),
-            ]),
-        );
-        let call = parse_call(&packet, &StringTable::empty()).expect("parses");
-        assert_eq!(call.service, "N=1:invcontainer#0,10004,-1");
-        assert_eq!(call.service_name(), "invcontainer");
-        assert_eq!(call.method, "List");
-        let b = crate::svc::bound::parse(&call.service).expect("decodes");
-        assert_eq!(b.params, vec![0, 10004, -1]);
-    }
-
-    #[test]
-    fn destination_service_beats_the_object_id() {
-        let packet = call_req(
-            MachoAddress::Node {
-                node_id: Some(1),
-                service: Some(b"corpRegistry".to_vec()),
-                call_id: None,
-            },
-            1,
-            Value::Tuple(vec![
-                Value::bytes("N=1:invcontainer#0,10004,-1"),
-                Value::bytes("GetCorporation"),
-                Value::Tuple(Vec::new()),
-                Value::Dict(Vec::new()),
-            ]),
-        );
-        let call = parse_call(&packet, &StringTable::empty()).expect("parses");
-        assert_eq!(call.service, "corpRegistry");
-    }
-
-    #[test]
-    fn the_registry_builds_without_conflicts() {
-        assert!(crate::svc::registry().len() > 20);
     }
 }

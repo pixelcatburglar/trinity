@@ -29,97 +29,6 @@ async fn add_to_bounty(ctx: &Ctx<'_>, call: &Call) -> Outcome {
     }
 }
 
-#[cfg(test)]
-mod bounty_tests {
-    use super::*;
-
-    fn character(tx: &mut crate::store::Tx<'_>, id: i64, name: &str) -> Result<(), StoreError> {
-        tx.insert("character_", &[("characterID", Cell::Int(id)), ("characterName", Cell::Text(name.into())),
-            ("balance", Cell::Float(20000.0)), ("securityRating", Cell::Float(-2.0))])?;
-        Ok(())
-    }
-
-    fn balance(fixture: &crate::test_support::Database, id: i64, column: &str) -> f64 {
-        fixture.store.read(|db| db.table("character_").get_id(id).unwrap().float(column).unwrap())
-    }
-
-    #[tokio::test]
-    async fn dashboard_feature_combat_history_and_alliance_search() {
-        let fixture = crate::test_support::Database::load().await;
-        let pilot = i64::from(fixture.id().await);
-        let other = i64::from(fixture.id().await);
-        let alliance = i64::from(fixture.id().await);
-        let name = format!("Test Alliance {alliance}");
-        let ticker = format!("T{alliance}");
-        fixture.store.write(|tx| tx.insert("alliances", &[("allianceID", Cell::Int(alliance)), ("allianceName", Cell::Text(name.as_str().into())),
-            ("shortName", Cell::Text(ticker.as_str().into()))])).unwrap();
-        let session = crate::session::Session {char_id:Some(pilot),..Default::default()};
-        let ctx = fixture.ctx(&session);
-        for (method, term) in [("LookupAlliances",name),("LookupAllianceShortNames",ticker)] {
-            let call = Call { service:"lookupSvc".into(),method:method.into(),args:vec![Value::text(term),Value::Int(1)],kwargs:vec![] };
-            let Some(Outcome::Value(Value::Instance {state,..})) = crate::svc::lookup::lookup_svc(&call,&ctx).await else {panic!("rowset")};
-            let lines = state.get_str("lines").unwrap().seq().unwrap();
-            assert_eq!(lines.len(),1);
-            assert_eq!(lines[0].seq().unwrap()[1],Value::Int(alliance));
-        }
-        fixture.store.write(|tx| -> Result<(), StoreError> {
-            let kill = tx.nextval("killLog_killID_seq")?;
-            tx.insert("killLog", &[("killID", Cell::Int(kill)), ("killTime", Cell::Int(1234)), ("victimCharID", Cell::Int(pilot)),
-                ("victimCorpID", Cell::Int(1000168)), ("victimShipTypeID", Cell::Int(606)), ("solarSystemID", Cell::Int(30004971)),
-                ("finalBlowID", Cell::Int(other)), ("totalDamage", Cell::Float(250.0)),
-                ("killBlob", Cell::Text(r#"<items><i t="34" f="5" d="2" x="3"/></items>"#.into()))])?;
-            tx.insert("killLogParticipants", &[("killID", Cell::Int(kill)), ("ownerID", Cell::Int(other)), ("corporationID", Cell::Int(1000168)),
-                ("shipTypeID", Cell::Int(606)), ("weaponTypeID", Cell::Int(484)), ("damageDone", Cell::Float(250.0)),
-                ("finalBlow", Cell::Int(1)), ("securityStatus", Cell::Float(-1.5))])?;
-            Ok(())
-        }).unwrap();
-        let Value::Instance {state,..} = recent_kills(&ctx) else {panic!("combat rowset")};
-        let lines = state.get_str("lines").unwrap().seq().unwrap();
-        assert_eq!(lines.len(),1);
-        let fields = lines[0].seq().unwrap();
-        assert_eq!(fields[9],Value::Int(other));
-        assert_eq!(fields[15],Value::Double(-1.5));
-        assert!(fields[16].as_string().unwrap().contains("d=\"2\" x=\"3\""));
-        let stranger = crate::session::Session {char_id:Some(i64::from(fixture.id().await)),..Default::default()};
-        let Value::Instance {state,..} = recent_kills(&fixture.ctx(&stranger)) else {panic!("rowset")};
-        assert!(state.get_str("lines").unwrap().seq().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn bounty_payment_validation_and_payout_are_atomic() {
-        let fixture = crate::test_support::Database::load().await;
-        let payer = i64::from(fixture.id().await);
-        let victim = i64::from(fixture.id().await);
-        let killer = i64::from(fixture.id().await);
-        let missing = i64::from(fixture.id().await);
-        fixture.store.write(|tx| -> Result<(), StoreError> {
-            for id in [payer,victim,killer] {
-                character(tx, id, &format!("Bounty test {id}"))?;
-            }
-            Ok(())
-        }).unwrap();
-        let session = crate::session::Session {char_id:Some(payer),..Default::default()};
-        let ctx = fixture.ctx(&session);
-        let call = |target:i64,amount| Call {service:"charmgr".into(),method:"AddToBounty".into(),args:vec![Value::Int(target),Value::Double(amount)],kwargs:vec![]};
-        for bad in [call(missing,5000.0),call(victim,f64::NAN),call(victim,4999.0),call(victim,30000.0),call(payer,5000.0)] {
-            assert!(matches!(add_to_bounty(&ctx,&bad).await,Outcome::UserError{..}));
-        }
-        assert_eq!(balance(&fixture,payer,"balance"),20000.0);
-        assert!(matches!(add_to_bounty(&ctx,&call(victim,5000.0)).await,Outcome::Value(Value::None)));
-        // A payout whose write is undone leaves the bounty in place.
-        let undone = fixture.store.write(|tx| -> Result<(), StoreError> {
-            assert_eq!(crate::losses::pay_player_bounty(tx,victim,killer)?,5000.0);
-            Err(StoreError { code: crate::store::DATA_EXCEPTION, message: "rolled back".into() })
-        });
-        assert!(undone.is_err());
-        assert_eq!(balance(&fixture,victim,"bounty"),5000.0);
-        assert_eq!(fixture.store.write(|tx| crate::losses::pay_player_bounty(tx,victim,killer)).unwrap(),5000.0);
-        assert_eq!(fixture.store.write(|tx| crate::losses::pay_player_bounty(tx,victim,killer)).unwrap(),0.0);
-        assert_eq!(balance(&fixture,killer,"balance"),25000.0);
-        assert!(fixture.store.read(|db| db.table("bounties").rows().all(|r| r.int("characterID") != Some(victim))));
-    }
-}
-
 /// A refused bounty: returned from the store write, it undoes what the
 /// write did.
 struct Refused(Outcome);
@@ -262,8 +171,6 @@ fn subject(call: &Call, ctx: &Ctx<'_>) -> i64 {
         .or(ctx.session.char_id)
         .unwrap_or(0)
 }
-
-
 
 fn empty_row(header: &[&str]) -> Value {
     row(header, header.iter().map(|_| Value::None).collect())

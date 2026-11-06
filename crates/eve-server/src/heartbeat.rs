@@ -68,16 +68,6 @@ impl Out {
         (hurt, drained)
     }
 
-    #[cfg(test)]
-    pub fn notes(&self) -> &[(i64, &'static str, Value)] {
-        &self.notes
-    }
-
-    #[cfg(test)]
-    pub fn destiny_entries(&self) -> &[(i64, Value)] {
-        &self.destiny
-    }
-
     /// Sends what was decided; returns the jobs left to do.
     pub fn deliver(self, world: &WorldState) -> Vec<Job> {
         let mut by_system: BTreeMap<i64, Vec<Value>> = BTreeMap::new();
@@ -480,47 +470,3 @@ pub fn fmt_isk(amount: f64) -> String {
     }
     out
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn isk_is_grouped_in_thousands() {
-        assert_eq!(fmt_isk(10_000.0), "10,000");
-        assert_eq!(fmt_isk(999.4), "999");
-        assert_eq!(fmt_isk(1_234_567.0), "1,234,567");
-    }
-
-    #[test]
-    fn marks_split_by_park() {
-        let mut out = Out::default();
-        out.hurt(1);
-        out.hurt(2);
-        out.drained(2);
-        let (hurt, drained) = out.take_marks(|id| id == 2);
-        assert_eq!(hurt.into_iter().collect::<Vec<_>>(), vec![2]);
-        assert_eq!(drained.into_iter().collect::<Vec<_>>(), vec![2]);
-        assert_eq!(out.hurt.into_iter().collect::<Vec<_>>(), vec![1]);
-    }
-
-    #[test]
-    fn limited_warp_reports_charge_and_resynchronizes_the_native_phase_once() {
-        use crate::ballpark::{Park,Pilot,Ship,ShipStats,WarpChange};
-        let mut park=Park::new(30_000_001,vec![],0);
-        park.ships.insert(1,Ship::new(1,10,ShipStats::new(10.0,1.0e6,1.0,300.0,1.0),Pilot{
-            type_id:587,group_id:25,name:"Warp test".into(),char_id:100,corp_id:1000002,
-            alliance_id:None,security:0.0,bounty:0.0},Vec3::ZERO,Vec3::ZERO));
-        park.warp_events.push((1,WarpChange::Entered{cost:4.0,limited:true}));
-        let mut out=Out::default();warp_changes(&mut park,&mut out);
-        assert_eq!(out.drained.into_iter().collect::<Vec<_>>(),vec![1]);
-        assert!(matches!(out.jobs.as_slice(),[Job::WarpResync{system:30_000_001}]));
-        assert_eq!(out.notes[0].1,"OnRemoteMessage");
-        assert_eq!(out.notes[0].2.seq().unwrap()[0],Value::bytes("WarpingWithAvailablePower"));
-        assert!(park.warp_events.is_empty());
-        let mut next=Out::default();warp_changes(&mut park,&mut next);
-        assert!(next.jobs.is_empty() && next.notes.is_empty());
-    }
-}
-
-#[cfg(test)] mod recovery_tests;

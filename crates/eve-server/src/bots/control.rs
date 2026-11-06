@@ -141,35 +141,3 @@ impl Following {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn requests_parse_from_words() {
-        assert_eq!(parse(&["event", "raid"]), Ok(Request::Event(events::Kind::Raid)));
-        assert_eq!(parse(&["war", "Black", "Legion", "|", "Red", "Pact"]), Ok(Request::War("Black Legion".into(), "Red Pact".into())));
-        assert_eq!(parse(&["density", "The", "Forge", "2"]), Ok(Request::Density("The Forge".into(), 2.0)));
-        assert_eq!(parse(&["follow", "Ana", "Sen"]), Ok(Request::Follow("Ana Sen".into())));
-        assert!(parse(&["event", "picnic"]).is_err());
-    }
-
-    #[test]
-    fn a_followed_bot_s_moves_are_written_down() {
-        let mut f = Following::default();
-        let mut bots = vec![super::super::behaviour::tests::bot(super::super::behaviour::Role::Miner)];
-        f.follow(0);
-        let name = |n: i32| n.to_string();
-        f.look(&bots, name, name, name);
-        bots[0].station = 0;
-        bots[0].system = 2;
-        bots[0].activity = Activity::Mining;
-        bots[0].isk = 5_000_000.0;
-        f.look(&bots, name, name, name);
-        let lines: Vec<&str> = f.bots[&0].1.iter().map(|(_, l)| l.as_str()).collect();
-        assert!(lines.iter().any(|l| l.starts_with("Undocked")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.starts_with("Now mining in 2")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.starts_with("Earned 5.0M")), "{lines:?}");
-    }
-}

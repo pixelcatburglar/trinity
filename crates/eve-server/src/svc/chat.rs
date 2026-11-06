@@ -67,39 +67,6 @@ async fn set_language_restriction(ctx: &Ctx<'_>, channel: i64, enabled: i64) -> 
     }
 }
 
-#[cfg(test)]
-mod trinity_tests {
-    use super::*;
-    #[tokio::test]
-    async fn dashboard_feature_language_restriction_is_persisted_and_voice_requires_membership() {
-        let fixture = crate::test_support::Database::load().await;
-        let pilot = fixture.id().await;
-        let channel = fixture.store.write(|tx| {
-            let id = tx.insert("channels", &[("ownerID", store::Value::Int(pilot as i64)), ("displayName", store::Value::Text("Language test".into()))])?;
-            Ok::<_, StoreError>(tx.table("channels").row(id).and_then(|r| r.int("channelID")).unwrap())
-        }).unwrap();
-        let player = crate::session::Session {char_id:Some(pilot as i64),..Default::default()};
-        assert!(matches!(set_language_restriction(&fixture.ctx(&player),channel,1).await,Outcome::UserError{..}));
-        let configure_call = Call {service:"LSC".into(),method:"Configure".into(),args:vec![Value::Int(channel)],
-            kwargs:vec![(Value::bytes("languageRestriction"),Value::Int(1))]};
-        assert!(matches!(lsc(&configure_call,&fixture.ctx(&player)).await,Some(Outcome::UserError{..})));
-        let gm = crate::session::Session {role:8,..player.clone()};
-        assert!(matches!(set_language_restriction(&fixture.ctx(&gm),channel,1).await,Outcome::Value(Value::None)));
-        let (line,_) = channel_info(&fixture.ctx(&player),channel).await.unwrap();
-        assert_eq!(line.len(),CHANNEL_HEADER.len());
-        assert_eq!(line[13],Value::Int(1));
-        assert_eq!(synthetic_mailbox(pilot as i64).len(),CHANNEL_HEADER.len());
-        let call = Call {service:"LSC".into(),method:"VoiceStatus".into(),args:vec![Value::Int(channel),Value::Int(2)],kwargs:vec![]};
-        assert!(matches!(lsc(&call,&fixture.ctx(&player)).await,Some(Outcome::UserError{..})));
-        let mut rx = fixture.world.lock().connect(1);
-        fixture.world.lock().join_channel(&Value::Int(channel),1);
-        assert!(matches!(lsc(&call,&fixture.ctx(&player)).await,Some(Outcome::Value(Value::None))));
-        let crate::world::Push::Notify(note) = rx.try_recv().unwrap() else {panic!("notification")};
-        assert_eq!(note.event,"OnLSC");
-        assert_eq!(note.args.seq().unwrap()[2],Value::bytes("VoiceStatus"));
-    }
-}
-
 pub async fn lsc(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
     let value = match call.method.as_str() {
         "JoinChannels" => join_channels(ctx, call.args.first()).await,

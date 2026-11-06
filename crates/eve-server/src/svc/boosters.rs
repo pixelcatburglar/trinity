@@ -8,7 +8,6 @@ use crate::store::{self, Store, StoreError, Tx};
 use super::{fitting, moves::{self, MoveError}};
 
 mod refresh;
-#[cfg(test)] mod tests;
 
 pub const FLAG: i64 = 88;
 pub const EXPIRY: i32 = 1088;

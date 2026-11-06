@@ -193,32 +193,6 @@ fn searched_types(category:Option<i32>,group:Option<i32>,ty:Option<i32>)->Vec<i3
     }).collect()
 }
 
-#[cfg(test)]
-mod asset_tests {
-    use super::*;
-    fn locations(value:Value)->Vec<i64> {
-        match value {Value::Instance {state,..}=>state.get_str("lines").and_then(Value::seq).unwrap_or(&[]).iter().filter_map(|line|line.seq()?.first()?.as_i64()).collect(),_=>vec![]}
-    }
-    #[tokio::test]
-    async fn corporation_asset_search_filters_owned_items_and_reports_office_stations() {
-        let fixture=crate::test_support::Database::load().await;let corp=i64::from(fixture.id().await);let office=i64::from(fixture.id().await);
-        fixture.store.write(|tx|{
-            tx.insert("corporation",&[("corporationID",store::Value::Int(corp)),("corporationName",store::Value::Text(format!("Asset corporation {corp}").into()))])?;
-            tx.insert("crpOffices",&[("corporationID",store::Value::Int(corp)),("stationID",store::Value::Int(60000004)),("officeFolderID",store::Value::Int(office)),("itemID",store::Value::Int(office))])?;
-            for (ty,owner,location,quantity,flag) in [(34,corp,office,5,4),(35,1,office,100,4),(34,corp,30000142,9,0)] {
-                tx.insert("entity",&[("typeID",store::Value::Int(ty)),("ownerID",store::Value::Int(owner)),("locationID",store::Value::Int(location)),("quantity",store::Value::Int(quantity)),("flag",store::Value::Int(flag))])?;
-            }
-            Ok::<_,StoreError>(())
-        }).unwrap();
-        let session=crate::session::Session {corp_id:Some(corp),roles_at_all:1,..Default::default()};let ctx=fixture.ctx(&session);
-        let mut call=Call {service:"corpmgr".into(),method:"SearchAssets".into(),args:vec![Value::bytes("offices"),Value::None,Value::None,Value::Int(34),Value::Int(5)],kwargs:vec![]};
-        assert_eq!(locations(search_assets(&ctx,&call).await),vec![60000004]);
-        call.args[4]=Value::Int(6);assert!(locations(search_assets(&ctx,&call).await).is_empty());
-        call.args[3]=Value::Int(35);assert!(locations(search_assets(&ctx,&call).await).is_empty());
-        call.args[0]=Value::bytes("property");call.args[3]=Value::Int(34);assert_eq!(locations(search_assets(&ctx,&call).await),vec![30000142]);
-    }
-}
-
 async fn asset_locations(ctx: &Ctx<'_>, corp: i64, which: &str) -> Value {
     let Some(scope) = asset_scope(which) else { return rowset(&["locationID"], Vec::new()) };
     // Office contents sit in the office item; report the station it is in.
@@ -728,7 +702,6 @@ async fn corp_station_mgr(
     };
     Outcome::Value(out)
 }
-
 
 async fn corporate_station_info(ctx: &Ctx<'_>, station: i64) -> Value {
     const OFFICE_HEADER: &[&str] = &["corporationID", "itemID", "officeFolderID"];

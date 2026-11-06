@@ -7,7 +7,7 @@
 //! same. The commands:
 //! - /create <type> [quantity]: into the hangar, or the hold in space;
 //! - /giveisk <amount>;
-//! - /giveskill <skill> [level]: trained, straight into the character;
+//! - /giveskill [me|charID|\"name\"] <skill|all> [level]: trained, straight into the character;
 //! - /setstanding <ownerID> <standing>: an NPC's standing toward you;
 //! - /spawn: a group of the system's rats, around your ship;
 //! - /tr me <station | system | celestial | character>;
@@ -33,6 +33,7 @@ const ROLE_LEGIONEER: i64 = 262_144;
 const FLAG_HANGAR: i64 = 4;
 const FLAG_CARGO: i64 = 5;
 const FLAG_SKILL: i64 = 7;
+const FLAG_SKILL_IN_TRAINING: i64 = 61;
 const CATEGORY_SKILL: i32 = 16;
 const ATTR_SKILL_TIME_CONSTANT: i32 = 275;
 const ATTR_SKILL_POINTS: i32 = 276;
@@ -51,6 +52,9 @@ impl From<StoreError> for Refused {
     }
 }
 
+/// Every command [`slash`] answers, for the client's autocompletion.
+const COMMANDS: &[&str] = &["bots", "create", "createitem", "giveisk", "givelp", "givemoney", "giveskill", "help", "setstanding", "spawn", "tr"];
+
 const HELP: &str = "/create <type> [qty], /giveisk <amount>, /givelp <amount> [corpID],/giveskill <skill> [level], /setstanding <ownerID> <standing>, /spawn, /tr me <place or pilot>, /bots on|off|status|event <kind>|war <a> | <b>|density <region> <x>|follow <name>";
 
 pub async fn slash(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
@@ -66,7 +70,16 @@ pub async fn slash(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
     let rest: Vec<&str> = words.collect();
     let me = ctx.session.char_id.unwrap_or(0);
     let result = match command.as_str() {
-        "help" | "" => Ok(HELP.to_string()),
+        // The chat window's slash service first asks with a bare "/" for the
+        // command list, and reads it only from a SlashError's reason, as
+        // "...: ['name', ...]" (svc_slash.py InitStuff). Any other answer
+        // fails it, and the command typed is never sent.
+        "" => {
+            let names = COMMANDS.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ");
+            let reason = format!("Commands: [{names}]");
+            return Some(Outcome::UserError { msg: "SlashError".into(), args: vec![("reason".into(), Value::bytes(reason))] });
+        }
+        "help" => Ok(HELP.to_string()),
         "create" | "createitem" => create(ctx, &rest).await,
         "giveisk" | "givemoney" => give_isk(ctx, &rest).await,
         "givelp" => give_lp(ctx, &rest).await,
@@ -90,7 +103,13 @@ pub async fn slash(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
     };
     info!("{me} /{command} {}: {}", rest.join(" "), match &result { Ok(r) => r.as_str(), Err(e) => e.as_str() });
     Some(match result {
-        Ok(reply) => Outcome::Value(Value::text(reply)),
+        Ok(reply) => {
+            // The chat window only logs a command's result; show it on screen.
+            let notify = Value::Dict(vec![(Value::bytes("notify"), Value::text(reply.clone()))]);
+            let w = ctx.world.lock();
+            w.notify(&[ctx.client_id], "OnRemoteMessage", Value::Tuple(vec![Value::bytes("CustomNotify"), notify]));
+            Outcome::Value(Value::text(reply))
+        }
         Err(why) => Outcome::custom(why),
     })
 }
@@ -241,38 +260,120 @@ async fn give_lp(ctx: &Ctx<'_>, words: &[&str]) -> Result<String, String> {
     Ok(format!("You now have {total} LP with corporation {corp}."))
 }
 
-/// A trained skill, made in the character (or an existing one raised).
-/// The skill list shows it after the next login.
+/// `/giveskill [who] <skill|all> [level]`, as the client's GM tools send it:
+/// the info window's "give required skills" (infosvc.py DoGiveSkills,
+/// `/giveskill me <typeID> <level>`), `/super` (`/giveskill me all 5`) and
+/// the trainer (`/giveskill <charID> ...`). Who is `me` (the default), a
+/// character ID or a quoted name; the skill a type ID or name, or `all`
+/// published skills; the level 5 unless given. A skill is only ever raised,
+/// so giving a ship's requirements never lowers what is already trained.
+/// The skill list shows new skills after the next login.
 async fn give_skill(ctx: &Ctx<'_>, words: &[&str]) -> Result<String, String> {
-    let me = ctx.session.char_id.unwrap_or(0);
+    let (target, target_name, words) = skill_target(ctx, words)?;
     let (name, level) = trailing_number(words);
+    if name.is_empty() {
+        return Err("Which skill? /giveskill [me|characterID|\"name\"] <skill|all> [level]".into());
+    }
     let level = level.unwrap_or(5.0).clamp(0.0, 5.0) as i64;
-    let (type_id, skill_name) = find_type(name, Some(CATEGORY_SKILL)).ok_or("No such skill.")?;
-    let stc = sde::get().type_attribute(type_id, ATTR_SKILL_TIME_CONSTANT).unwrap_or(1.0) * 250.0;
-    let points = crate::losses::points_at(stc, level);
-    let events = ctx
+    let types: Vec<(i64, String)> = if matches!(name, [all] if all.eq_ignore_ascii_case("all")) {
+        let sde = sde::get();
+        sde::table("invTypes")
+            .rows()
+            .filter(|t| t.bool("published") == Some(true))
+            .filter_map(|t| Some((t.int("typeID")?, t.text("typeName").unwrap_or("").to_string())))
+            .filter(|(id, _)| sde.group_and_category(*id).map(|(_, c)| c) == Some(i64::from(CATEGORY_SKILL)))
+            .collect()
+    } else {
+        vec![find_type(name, Some(CATEGORY_SKILL)).ok_or("No such skill.")?]
+    };
+    let now = crate::bulkdata::filetime_now();
+    let (events, raised) = ctx
         .store
         .write(|tx| {
             let mut items = ItemTxn::new(tx);
-            let existing = items
-                .db()
-                .table("entity")
-                .find(&["locationID"], &[V::Int(me)])
-                .find(|r| r.int("typeID") == Some(type_id) && r.int("flag") == Some(FLAG_SKILL))
-                .and_then(|r| r.int("itemID"));
-            let id = match existing {
-                Some(id) => id,
-                None => items.create(NewItem { type_id, owner_id: me, location_id: me, flag: FLAG_SKILL, quantity: 1, singleton: true })?,
-            };
-            for (attr, value) in [(ATTR_SKILL_LEVEL, level), (ATTR_SKILL_POINTS, points.round() as i64)] {
-                let sets = [("itemID", V::Int(id)), ("attributeID", V::Int(attr as i64)), ("valueInt", V::Int(value)), ("valueFloat", V::Null)];
-                items.tx().upsert("entity_attributes", &["itemID", "attributeID"], &sets, &[("valueInt", V::Int(value)), ("valueFloat", V::Null)])?;
+            let mut raised = 0;
+            for (type_id, _) in &types {
+                raised += usize::from(raise_skill(&mut items, target, *type_id, level, now)?);
             }
-            Ok::<_, StoreError>(items.events())
+            Ok::<_, StoreError>((items.events(), raised))
         })
         .map_err(|e| e.to_string())?;
-    crate::items::notify(ctx.world, ctx.client_id, events);
-    Ok(format!("{skill_name} is now at level {level} ({points:.0} SP); log in again to see it in the skill list"))
+    {
+        let w = ctx.world.lock();
+        let clients = w.clients_of(target);
+        for event in events {
+            w.notify(&clients, "OnItemChange", event);
+        }
+    }
+    let whose = if target == ctx.session.char_id.unwrap_or(0) { String::new() } else { format!("{target_name}'s ") };
+    Ok(match types.as_slice() {
+        [(_, skill)] if raised == 0 => format!("{whose}{skill} is already at level {level} or above"),
+        [(_, skill)] => format!("{whose}{skill} is now at level {level}; log in again to see it in the skill list"),
+        _ => format!("{raised} of {whose}{} skills raised to level {level}; log in again to see them in the skill list", types.len()),
+    })
+}
+
+/// Who a `/giveskill` is for, their name, and the words after them: `me`, a
+/// character's ID or a quoted name first, else the caller.
+fn skill_target<'a>(ctx: &Ctx<'_>, words: &'a [&'a str]) -> Result<(i64, String, &'a [&'a str]), String> {
+    let me = ctx.session.char_id.unwrap_or(0);
+    let name_of = |id: i64| ctx.store.read(|db| db.table("character_").get_id(id).and_then(|c| c.text("characterName").map(str::to_string)));
+    let Some(first) = words.first() else { return Err("Usage: /giveskill [me|characterID|\"name\"] <skill|all> [level]".into()) };
+    if first.eq_ignore_ascii_case("me") {
+        return Ok((me, String::new(), &words[1..]));
+    }
+    if first.starts_with('"') {
+        // The name runs to the word that closes its quote.
+        let close = words
+            .iter()
+            .enumerate()
+            .position(|(i, w)| if i == 0 { w.len() > 1 && w.ends_with('"') } else { w.ends_with('"') })
+            .ok_or("Close the pilot's name with a quote.")?;
+        let wanted = words[..=close].join(" ").trim_matches('"').to_ascii_lowercase();
+        let found = ctx.store.read(|db| {
+            db.table("character_").rows().find(|c| c.text("characterName").is_some_and(|n| n.to_ascii_lowercase() == wanted)).and_then(|c| Some((c.int("characterID")?, c.text("characterName")?.to_string())))
+        });
+        let (id, name) = found.ok_or("No such pilot.")?;
+        return Ok((id, name, &words[close + 1..]));
+    }
+    // A number that names a character, with a skill after it; else the
+    // number is the skill (`/giveskill 3300 5`).
+    if words.len() > 1 {
+        if let Some((id, name)) = first.parse::<i64>().ok().and_then(|id| Some((id, name_of(id)?))) {
+            return Ok((id, name, &words[1..]));
+        }
+    }
+    Ok((me, String::new(), words))
+}
+
+/// Raise `char_id`'s skill of `type_id` to `level` (made if they lack it),
+/// with the points that level needs: false if it was already there.
+fn raise_skill(items: &mut ItemTxn<'_, '_>, char_id: i64, type_id: i64, level: i64, now: i64) -> Result<bool, StoreError> {
+    let existing = items
+        .db()
+        .table("entity")
+        .find(&["locationID"], &[V::Int(char_id)])
+        .find(|r| r.int("typeID") == Some(type_id) && matches!(r.int("flag"), Some(FLAG_SKILL | FLAG_SKILL_IN_TRAINING)))
+        .and_then(|r| r.int("itemID"));
+    let attr = |items: &ItemTxn<'_, '_>, id: i64, a: i32| {
+        items.db().table("entity_attributes").get(&[V::Int(id), V::Int(i64::from(a))]).and_then(|r| r.float("valueFloat").or_else(|| r.int("valueInt").map(|v| v as f64)))
+    };
+    let (have_level, have_points) = existing.map_or((None, 0.0), |id| (attr(items, id, ATTR_SKILL_LEVEL), attr(items, id, ATTR_SKILL_POINTS).unwrap_or(0.0)));
+    if have_level.is_some_and(|l| l.round() as i64 >= level) {
+        return Ok(false);
+    }
+    let id = match existing {
+        Some(id) => id,
+        None => items.create(NewItem { type_id, owner_id: char_id, location_id: char_id, flag: FLAG_SKILL, quantity: 1, singleton: true })?,
+    };
+    let stc = sde::get().type_attribute(type_id, ATTR_SKILL_TIME_CONSTANT).unwrap_or(1.0) * 250.0;
+    let points = crate::losses::points_at(stc, level).round().max(have_points) as i64;
+    for (attr, value) in [(ATTR_SKILL_LEVEL, level), (ATTR_SKILL_POINTS, points)] {
+        let sets = [("itemID", V::Int(id)), ("attributeID", V::Int(attr as i64)), ("valueInt", V::Int(value)), ("valueFloat", V::Null)];
+        items.tx().upsert("entity_attributes", &["itemID", "attributeID"], &sets, &[("valueInt", V::Int(value)), ("valueFloat", V::Null)])?;
+    }
+    crate::svc::skills::history::record(items.tx(), char_id, type_id, crate::svc::skills::history::GM_GAVE_SKILL, now, points as f64)?;
+    Ok(true)
 }
 
 async fn set_standing(ctx: &Ctx<'_>, words: &[&str]) -> Result<String, String> {

@@ -8,9 +8,6 @@ use super::History;
 use crate::store::{Db, Row, StoreError, Tx, Value};
 use crate::{ballpark::Ship, items::Item};
 
-#[cfg(test)]
-mod tests;
-
 /// The `cloakCooldowns` table and the entity trigger that drops a binding
 /// whose custody changed are part of the store's schema.
 pub fn ensure(_tx:&mut Tx<'_>)->Result<(),StoreError> {

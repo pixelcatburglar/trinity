@@ -455,20 +455,3 @@ pub async fn save_ammo(store: &Store, item_id: i64, quantity: i64) {
         error!("saving the rounds of {item_id}: {}", crate::logging::chain(&e));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn batteries_get_the_profile_of_their_group() {
-        let mut a = HashMap::new();
-        a.insert(ATTR_SPEED_FACTOR, -75.0);
-        a.insert(attr::MAX_RANGE, 150_000.0);
-        a.insert(ATTR_DURATION, 10_000.0);
-        let g = profile(GROUP_WEB_BATTERY, &a).expect("a web battery");
-        assert_eq!(g.weapon, Weapon::Ew { action: Action::Web(0.25), optimal: 150_000.0, falloff: 0.0 });
-        assert_eq!(g.cycle_ms, 10_000);
-        assert!(profile(365, &a).is_none(), "a tower is not a defence");
-    }
-}

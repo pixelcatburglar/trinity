@@ -143,4 +143,3 @@ fn backfill_character_origins(tx: &mut Tx) -> Result<(), StoreError> {
     }
     Ok(())
 }
-

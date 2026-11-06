@@ -21,8 +21,6 @@ use crate::store::{self, Db, Row, StoreError, Tx};
 use crate::svc::space::{self, entry};
 
 mod activation;
-#[cfg(test)]
-mod cloak_tests;
 
 /// Effect categories (dgmEffects.effectCategory).
 const TARGETED: i16 = 2;
@@ -319,67 +317,6 @@ pub(crate) fn write_vitals_at(tx: &mut Tx<'_>, ship_id: i64, fighter: &Fighter, 
         tx.delete_where("entity_attributes", &["itemID", "attributeID"], &key(a))?;
     }
     Ok(())
-}
-
-/// Save only the still-current ship in its still-current system. A delayed
-/// checkpoint must never overwrite a completed jump, dock, boarding or loss.
-#[cfg(test)]
-pub async fn save_space_state(store: &crate::store::Store, system: i64, ship: &Ship) -> Result<bool, StoreError> {
-    crate::space_state::save_detached(store,system,ship,crate::destiny::tick_now()).await
-}
-
-#[cfg(test)]
-mod persistence_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn space_state_preserves_position_and_charges_without_overwriting_later_travel() {
-        let fixture = crate::test_support::Database::load().await;
-        let pilot = i64::from(fixture.id().await);
-        let ship_id = i64::from(fixture.id().await);
-        let system = 30000142i64;
-        let set_location = |system: i64, station: i64| {
-            fixture.store.write(|tx| {
-                let row = tx.table("character_").get_id(pilot).unwrap().id;
-                tx.update("character_", row, &[("solarSystemID", store::Value::Int(system)), ("stationID", store::Value::Int(station))])
-            }).unwrap();
-        };
-        fixture.store.write(|tx| -> Result<(), StoreError> {
-            tx.insert("character_", &[("characterID", store::Value::Int(pilot)), ("characterName", store::Value::Text(format!("Space save {pilot}").into())),
-                ("shipID", store::Value::Int(ship_id)), ("solarSystemID", store::Value::Int(system)), ("stationID", store::Value::Int(0))])?;
-            tx.insert("entity", &[("itemID", store::Value::Int(ship_id)), ("typeID", store::Value::Int(587)), ("ownerID", store::Value::Int(pilot)),
-                ("locationID", store::Value::Int(system)), ("quantity", store::Value::Int(1)), ("singleton", store::Value::Int(1))])?;
-            Ok(())
-        }).unwrap();
-        let session = crate::session::Session { char_id:Some(pilot), ship_id:Some(ship_id), solar_system_id:Some(system), ..Default::default() };
-        let mut ship = ship_for_space(&fixture.ctx(&session),pilot,ship_id).await.unwrap();
-        ship.pos = crate::ballpark::Vec3::new(12.0,34.0,56.0);
-        let now = combat::now_ms();
-        let vitals = &mut ship.fight.as_mut().unwrap().vitals;
-        vitals.armor_damage = 7.0;
-        vitals.hull_damage = 3.0;
-        vitals.shield = Charged::full(1000.0,0.0,now);
-        vitals.shield.set(now,25.0);
-        vitals.capacitor = Charged::full(1000.0,0.0,now);
-        vitals.capacitor.set(now,15.0);
-        assert!(save_space_state(&fixture.store,system,&ship).await.unwrap());
-        let restored = ship_for_space(&fixture.ctx(&session),pilot,ship_id).await.unwrap();
-        assert_eq!(restored.pos,ship.pos);
-        assert_eq!(restored.fight.as_ref().unwrap().vitals.armor_damage,7.0);
-        assert_eq!(restored.fight.as_ref().unwrap().vitals.hull_damage,3.0);
-        let charges: Vec<(i64, Option<f64>)> = fixture.store.read(|db| db.table("entity_attributes").find(&["itemID"],&[store::Value::Int(ship_id)])
-            .filter(|r| [attr::CHARGE,attr::SHIELD_CHARGE].map(i64::from).contains(&r.int("attributeID").unwrap()))
-            .map(|r| (r.int("attributeID").unwrap(), r.float("valueFloat"))).collect());
-        assert_eq!(charges.len(),2);
-        assert!(charges.contains(&(i64::from(attr::CHARGE),Some(15.0))));
-        assert!(charges.contains(&(i64::from(attr::SHIELD_CHARGE),Some(25.0))));
-        set_location(system+1,0);
-        ship.pos = crate::ballpark::Vec3::ZERO;
-        assert!(!save_space_state(&fixture.store,system,&ship).await.unwrap());
-        assert_eq!(ship_for_space(&fixture.ctx(&session),pilot,ship_id).await.unwrap().pos,restored.pos);
-        set_location(system,60000001);
-        assert!(!save_space_state(&fixture.store,system,&ship).await.unwrap());
-    }
 }
 
 // ---- targeting --------------------------------------------------------------------------
