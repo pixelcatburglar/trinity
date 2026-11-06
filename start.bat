@@ -19,6 +19,8 @@ exit /b %errorlevel%
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# Load the checksum cmdlet even when cmd inherits PowerShell 7's module path.
+Import-Module ([IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1'))
 $Self = [IO.Path]::GetFullPath($env:TRINITY_LAUNCHER)
 $Root = [IO.Path]::GetDirectoryName($Self)
 $SourceRoot = $Root
@@ -383,6 +385,69 @@ function Test-Listening([int]$Port) {
     try { $task = $tcp.ConnectAsync('127.0.0.1', $Port); return ($task.Wait(200) -and $tcp.Connected) } catch { return $false } finally { $tcp.Dispose() }
 }
 
+function Get-TrinityBuildFingerprint([string]$Checkout, [string[]]$BuildArguments) {
+    $files = @((Join-Path $Checkout 'Cargo.toml'), (Join-Path $Checkout 'Cargo.lock'))
+    # The server embeds SQL dumps from db/ as well as assets from the crates.
+    foreach ($directory in @('crates', 'db')) {
+        $files += [IO.Directory]::GetFiles((Join-Path $Checkout $directory), '*', [IO.SearchOption]::AllDirectories)
+    }
+    foreach ($name in @('.cargo\config', '.cargo\config.toml')) {
+        $path = Join-Path $Checkout $name
+        if ([IO.File]::Exists($path)) { $files += $path }
+    }
+    [string[]]$files = $files
+    [Array]::Sort($files, [StringComparer]::Ordinal)
+
+    $manifest = New-Object Text.StringBuilder
+    [void]$manifest.AppendLine(($BuildArguments -join ' '))
+    foreach ($name in @('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS')) {
+        [void]$manifest.AppendLine($name + '=' + [Environment]::GetEnvironmentVariable($name))
+    }
+    foreach ($file in $files) {
+        Assert-Running
+        $digest = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        [void]$manifest.AppendLine($file.Substring($Checkout.Length) + ':' + $digest)
+    }
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($manifest.ToString())
+        return ([BitConverter]::ToString($hash.ComputeHash($bytes))).Replace('-', '')
+    } finally { $hash.Dispose() }
+}
+
+function Get-TrinityBinutils {
+    # Rust ships dlltool.exe but omits the assembler it looks for beside itself.
+    # Keep the matched portable pair together, outside the Rust toolchain.
+    $directory = Join-Path $Runtime 'tools\w64devkit-2.11.0'
+    $bin = Join-Path $directory 'w64devkit\bin'
+    $files = [ordered]@{
+        'dlltool.exe' = 'ce23d0f48c797fb36e7e4e547fffc7a4d58739d39917fab06ce2ff077b9e6ec2'
+        'as.exe' = '44b6f3bda1cae50b8774d990b1eef9d65e41637970482c2c1f2ca2be4fdcf183'
+    }
+    $invalid = @($files.Keys | Where-Object {
+        $file = Join-Path $bin $_
+        -not [IO.File]::Exists($file) -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $files[$_]
+    })
+    if ($invalid.Count -eq 0) { return $bin }
+
+    Set-Status 'Build tools' 'Preparing portable Windows assembler and DLL tools' 34
+    $name = 'w64devkit-x64-2.11.0.7z.exe'
+    $url = 'https://github.com/skeeto/w64devkit/releases/download/v2.11.0/' + $name
+    $archive = Get-Download $url $name '54c2bb9962e8a30c8270e34c5efc3d5fee579f53087fa7d435b95fbba2af7b2b'
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+    # Read the self-extracting archive with Windows tar; do not run the installer.
+    $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+    Set-Status 'Build tools' 'Extracting verified Windows build tools' 34
+    Invoke-Native $tar @('-xf', $archive, '-C', $directory, 'w64devkit/bin/dlltool.exe', 'w64devkit/bin/as.exe')
+    foreach ($name in $files.Keys) {
+        $file = Join-Path $bin $name
+        if (-not [IO.File]::Exists($file) -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $files[$name]) {
+            throw "The portable build tool $name failed verification."
+        }
+    }
+    return $bin
+}
+
 function Start-TrinityWorker {
     $lock = $null; $server = $null; $exitCode = 0
     $gamePort = 26000; $webPort = 18080
@@ -439,51 +504,79 @@ function Start-TrinityWorker {
         if (-not (Test-FreePort $webPort)) { throw 'Trinity dashboard port 18080 is already in use. Close the application using it before starting Trinity.' }
         $script:Status.gamePort = $gamePort; $script:Status.webPort = $webPort
 
-        Set-Status 'Toolchain' 'Preparing portable Rust 1.97 (first run downloads the compiler)' 8
-        $env:CARGO_HOME = Join-Path $Runtime 'cargo'
-        $env:RUSTUP_HOME = Join-Path $Runtime 'rustup'
-        $env:RUSTUP_TOOLCHAIN = '1.97.0-x86_64-pc-windows-gnu'
-        $env:CARGO_TARGET_DIR = Join-Path $Root 'target'
-        $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-gnu'
-        $env:CARGO_TERM_COLOR = 'never'
-        $toolDir = Join-Path $Runtime 'tools'
-        [IO.Directory]::CreateDirectory($toolDir) | Out-Null
-        $rustup = Join-Path $toolDir 'rustup.exe'
-        if (-not (Test-Path -LiteralPath $rustup)) {
-            $bootstrap = Get-Download 'https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-pc-windows-gnu/rustup-init.exe' 'rustup-init.exe' 'ccbfd951d8024856043b3a0c3903a59f39937bce8d3074768b0d3da55f21e817'
-            if ([string]::IsNullOrWhiteSpace($bootstrap) -or -not [IO.File]::Exists($bootstrap)) { throw 'The Rust download did not return a valid file path. Run start.bat again to retry.' }
-            [IO.File]::Copy($bootstrap, $rustup, $true)
+        Set-Status 'Checking build' 'Checking whether the existing server build can be reused' 5
+        $toolchain = '1.97.0-x86_64-pc-windows-gnu'
+        $target = 'x86_64-pc-windows-gnu'
+        $buildArguments = @('run', $toolchain, 'cargo', 'build', '--release', '--locked', '-p', 'eve-server', '--bin', 'eve-server', '--target', $target)
+        $serverExe = Join-Path $Root "target\$target\release\eve-server.exe"
+        $buildStamp = Join-Path $Runtime 'build.json'
+        $fingerprint = Get-TrinityBuildFingerprint $Root $buildArguments
+        $needsBuild = $true
+        if ([IO.File]::Exists($buildStamp) -and [IO.File]::Exists($serverExe)) {
+            try {
+                $oldBuild = [IO.File]::ReadAllText($buildStamp) | ConvertFrom-Json
+                if ($oldBuild.fingerprint -eq $fingerprint -and $oldBuild.serverHash -eq (Get-FileHash -LiteralPath $serverExe -Algorithm SHA256).Hash) {
+                    $needsBuild = $false
+                }
+            } catch { Write-Log 'Build cache could not be verified; rebuilding.' }
         }
-        $toolchainReady = Join-Path $Runtime 'rust-toolchain-installed.ok'
-        if (-not (Test-Path -LiteralPath $toolchainReady) -or -not (Test-Path -LiteralPath (Join-Path $env:RUSTUP_HOME 'toolchains\1.97.0-x86_64-pc-windows-gnu\bin\rustc.exe'))) {
-            # Pin the minimal profile archives from Rust's official 1.97.0 manifest.
-            # Prefill rustup's verified cache so every large download uses the live
-            # byte-based progress display, even though rustup runs without a console.
-            $components = @(
-                @{ name = 'rustc'; hash = 'c5b717977488eb02b56fa89c3629a7b7ebdaf1c6aecc3a6897cb924aa128c138' }
-                @{ name = 'cargo'; hash = '8ef34ae3c90879860103fdb00a0120940f20f3c77b8647372c54aa3a6de21b3d' }
-                @{ name = 'rust-std'; hash = '98e6ef703b003b1f7d75c3249a831f4ac07f0deb41b0e1dfe41054847ac2816f' }
-                @{ name = 'rust-mingw'; hash = '5d0bb89c6652df6dd759247c3c5c92d8d681f0fe1d7650bc5db9f31f179844ee' }
-            )
-            $rustupDownloads = Join-Path $env:RUSTUP_HOME 'downloads'
-            [IO.Directory]::CreateDirectory($rustupDownloads) | Out-Null
-            $componentIndex = 0
-            foreach ($component in $components) {
-                Assert-Running
-                $componentIndex++
-                Set-Status 'Downloading Rust' ("Compiler component {0} of {1}: {2}" -f $componentIndex,$components.Count,$component.name) (8 + 2 * $componentIndex)
-                $cachedArchive = Join-Path $rustupDownloads $component.hash
-                if ([IO.File]::Exists($cachedArchive) -and (Get-FileHash -LiteralPath $cachedArchive -Algorithm SHA256).Hash -eq $component.hash) { continue }
-                $archiveName = $component.name + '-1.97.0-x86_64-pc-windows-gnu.tar.xz'
-                $componentArchive = Get-Download ('https://static.rust-lang.org/dist/2026-07-09/' + $archiveName) $archiveName $component.hash
-                [IO.File]::Copy($componentArchive, $cachedArchive, $true)
+        if ($needsBuild) {
+            Set-Status 'Toolchain' 'Preparing portable Rust 1.97 (first run downloads the compiler)' 8
+            $env:CARGO_HOME = Join-Path $Runtime 'cargo'
+            $env:RUSTUP_HOME = Join-Path $Runtime 'rustup'
+            $env:RUSTUP_TOOLCHAIN = $toolchain
+            $env:CARGO_TARGET_DIR = Join-Path $Root 'target'
+            $env:CARGO_BUILD_TARGET = $target
+            $env:CARGO_TERM_COLOR = 'never'
+            $toolDir = Join-Path $Runtime 'tools'
+            [IO.Directory]::CreateDirectory($toolDir) | Out-Null
+            $rustup = Join-Path $toolDir 'rustup.exe'
+            if (-not (Test-Path -LiteralPath $rustup)) {
+                $bootstrap = Get-Download 'https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-pc-windows-gnu/rustup-init.exe' 'rustup-init.exe' 'ccbfd951d8024856043b3a0c3903a59f39937bce8d3074768b0d3da55f21e817'
+                if ([string]::IsNullOrWhiteSpace($bootstrap) -or -not [IO.File]::Exists($bootstrap)) { throw 'The Rust download did not return a valid file path. Run start.bat again to retry.' }
+                [IO.File]::Copy($bootstrap, $rustup, $true)
             }
-            Set-Status 'Installing Rust' 'Downloads complete. Installing the portable compiler...' 18
-            Invoke-Native $rustup @('toolchain','install','1.97.0-x86_64-pc-windows-gnu','--profile','minimal','--no-self-update')
-            [IO.File]::WriteAllText($toolchainReady, '1.97.0-x86_64-pc-windows-gnu', $Utf8)
+            $toolchainReady = Join-Path $Runtime 'rust-toolchain-installed.ok'
+            if (-not (Test-Path -LiteralPath $toolchainReady) -or -not (Test-Path -LiteralPath (Join-Path $env:RUSTUP_HOME "toolchains\$toolchain\bin\rustc.exe"))) {
+                # Pin the minimal profile archives from Rust's official 1.97.0 manifest.
+                # Prefill rustup's verified cache so every large download uses the live
+                # byte-based progress display, even though rustup runs without a console.
+                $components = @(
+                    @{ name = 'rustc'; hash = 'c5b717977488eb02b56fa89c3629a7b7ebdaf1c6aecc3a6897cb924aa128c138' }
+                    @{ name = 'cargo'; hash = '8ef34ae3c90879860103fdb00a0120940f20f3c77b8647372c54aa3a6de21b3d' }
+                    @{ name = 'rust-std'; hash = '98e6ef703b003b1f7d75c3249a831f4ac07f0deb41b0e1dfe41054847ac2816f' }
+                    @{ name = 'rust-mingw'; hash = '5d0bb89c6652df6dd759247c3c5c92d8d681f0fe1d7650bc5db9f31f179844ee' }
+                )
+                $rustupDownloads = Join-Path $env:RUSTUP_HOME 'downloads'
+                [IO.Directory]::CreateDirectory($rustupDownloads) | Out-Null
+                $componentIndex = 0
+                foreach ($component in $components) {
+                    Assert-Running
+                    $componentIndex++
+                    Set-Status 'Downloading Rust' ("Compiler component {0} of {1}: {2}" -f $componentIndex,$components.Count,$component.name) (8 + 2 * $componentIndex)
+                    $cachedArchive = Join-Path $rustupDownloads $component.hash
+                    if ([IO.File]::Exists($cachedArchive) -and (Get-FileHash -LiteralPath $cachedArchive -Algorithm SHA256).Hash -eq $component.hash) { continue }
+                    $archiveName = $component.name + '-1.97.0-x86_64-pc-windows-gnu.tar.xz'
+                    $componentArchive = Get-Download ('https://static.rust-lang.org/dist/2026-07-09/' + $archiveName) $archiveName $component.hash
+                    [IO.File]::Copy($componentArchive, $cachedArchive, $true)
+                }
+                Set-Status 'Installing Rust' 'Downloads complete. Installing the portable compiler...' 18
+                Invoke-Native $rustup @('toolchain','install',$toolchain,'--profile','minimal','--no-self-update')
+                [IO.File]::WriteAllText($toolchainReady, '1.97.0-x86_64-pc-windows-gnu', $Utf8)
+            }
+            $binutils = Get-TrinityBinutils
+            Set-Status 'Building' 'Compiling Trinity; later launches reuse the verified build' 35
+            $previousPath = $env:Path
+            try {
+                $env:Path = $binutils + ';' + $previousPath
+                Invoke-Native $rustup $buildArguments
+            } finally { $env:Path = $previousPath }
+            if (-not [IO.File]::Exists($serverExe)) { throw 'The build did not produce eve-server.exe.' }
+            $buildRecord = [pscustomobject]@{ fingerprint = $fingerprint; serverHash = (Get-FileHash -LiteralPath $serverExe -Algorithm SHA256).Hash }
+            [IO.File]::WriteAllText($buildStamp, ($buildRecord | ConvertTo-Json), $Utf8)
+        } else {
+            Write-Log 'Using the verified existing server build.'
         }
-        Set-Status 'Building' 'Compiling Trinity; later launches reuse the build cache' 35
-        Invoke-Native $rustup @('run','1.97.0-x86_64-pc-windows-gnu','cargo','build','--release','--locked','-p','eve-server','--bin','eve-server','--target','x86_64-pc-windows-gnu')
 
         # ONE-TIME MIGRATION from the old PostgreSQL-based launcher. Old versions kept their
         # cluster in .trinity\data. The server's own data lives in .trinity\world. If world has
@@ -549,8 +642,7 @@ function Start-TrinityWorker {
         $env:RMR_LOG_FILE = Join-Path $Logs 'server.log'
         $env:RMR_DUMP_DIR = Join-Path $Logs 'dumps'
         [IO.Directory]::CreateDirectory($env:RMR_DUMP_DIR) | Out-Null
-        $binaryDir = Join-Path $Root 'target\x86_64-pc-windows-gnu\release'
-        $server = New-NativeProcess (Join-Path $binaryDir 'eve-server.exe') @()
+        $server = New-NativeProcess $serverExe @()
         $watch = [Diagnostics.Stopwatch]::StartNew()
         while (-not (Test-Listening $gamePort) -or -not (Test-Listening $webPort)) {
             Assert-Running; Read-NativeOutput $server
