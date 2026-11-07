@@ -87,7 +87,7 @@ pub async fn corp_registry(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
         "KickOutMember" => kick_out(ctx, call.arg_id(0)).await,
         "UpdateMember" => {
             let roles: Vec<Option<i64>> = (4..12).map(|i| call.arg_i64(i)).collect();
-            update_member(ctx, call.arg_id(0), call.arg_text(1), &roles).await
+            update_member(ctx, call.arg_id(0), call.arg_text(1), &roles, call.arg_i64(13)).await
         }
         "UpdateMembers" => update_members(ctx, call.args.first()).await,
         "CanBeKickedOut" => Ok(Value::Bool(can_be_kicked_out(ctx, call.arg_id(0)))),
@@ -471,7 +471,7 @@ const ROLE_COLUMNS: [&str; 8] = [
 /// rolesAtOther, grantableRolesAtOther, baseID, titleMask); None leaves a
 /// value as it is. The CEO and directors manage members; only the CEO makes
 /// or manages directors, and nobody changes the CEO.
-async fn update_member(ctx: &Ctx<'_>, char_id: i64, title: Option<String>, roles: &[Option<i64>]) -> Refused<Value> {
+async fn update_member(ctx: &Ctx<'_>, char_id: i64, title: Option<String>, roles: &[Option<i64>], title_mask: Option<i64>) -> Refused<Value> {
     let corp_id = ctx.session.corp_id.unwrap_or(0);
     let me = ctx.session.char_id.unwrap_or(0);
     let (_, ceo, held) = ctx
@@ -492,6 +492,21 @@ async fn update_member(ctx: &Ctx<'_>, char_id: i64, title: Option<String>, roles
         return Err(access_denied("only the CEO may appoint or manage directors"));
     }
 
+    let title_mask = title_mask.map(crate::svc::corp::titles::checked_mask).transpose()?;
+    if let Some(mask) = title_mask {
+        let old = ctx
+            .store
+            .write(|tx| match tx.table("character_").get_id(char_id).map(|c| (c.id, c.int("titleMask").unwrap_or(0))) {
+                Some((row, old)) => tx.update("character_", row, &[("titleMask", int(mask))]).map(|_| Some(old)),
+                None => Ok(None),
+            })
+            .map_err(|e| db_failed("setting the titles", e))?;
+        if let Some(old) = old.filter(|old| *old != mask) {
+            let w = ctx.world.lock();
+            let diff = Value::Dict(vec![(Value::bytes("titleMask"), Value::Tuple(vec![Value::Long(old), Value::Long(mask)]))]);
+            w.notify(&w.corp_members(corp_id), "OnCorporationMemberChanged", Value::Tuple(vec![Value::Int(char_id), diff]));
+        }
+    }
     if let Some(title) = &title {
         ctx.store
             .write(|tx| match tx.table("character_").get_id(char_id).map(|c| c.id) {
@@ -538,7 +553,7 @@ async fn update_members(ctx: &Ctx<'_>, rows: Option<&Value>) -> Refused<Value> {
         let char_id = l.first().and_then(|v| v.as_i64()).unwrap_or(0);
         let title = l.get(1).and_then(|v| v.as_string());
         let roles: Vec<Option<i64>> = (4..12).map(|i| l.get(i).and_then(|v| v.as_i64())).collect();
-        update_member(ctx, char_id, title, &roles).await?;
+        update_member(ctx, char_id, title, &roles, l.get(13).and_then(|v| v.as_i64())).await?;
     }
     Ok(Value::None)
 }

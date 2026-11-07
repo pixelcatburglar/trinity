@@ -202,6 +202,12 @@ impl Conn {
         for (channel,members) in channels {chat::announce(&world,&members,&channel,"LeaveChannel",&who,Vec::new());}
         owned.into_iter().map(|(id,_)|id).collect::<Vec<_>>()
         };
+        // Member tracking's last-online time (svc/corp/views.rs).
+        if let Some(char_id) = self.session.char_id {
+            if let Err(e) = crate::svc::corp::views::record_logoff(&self.server.store, char_id) {
+                warn!("recording {char_id}'s logoff: {}", crate::logging::chain(&e));
+            }
+        }
         // A hull free to go leaves space with its final snapshot saved. One
         // kept live (an active cycle) can be reclaimed by a reconnect. The
         // heartbeat keeps the obligation if this connection task is lost.

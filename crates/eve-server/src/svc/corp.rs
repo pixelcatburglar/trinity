@@ -1,4 +1,6 @@
 mod offices;
+pub(crate) mod titles;
+pub(crate) mod views;
 pub(crate) use offices::{ensure_schema as ensure_office_schema,ensure_slots_locked as ensure_office_slots_locked};
 
 use eve_marshal::Value;
@@ -9,7 +11,7 @@ use crate::services::{Call, Ctx, Outcome};
 use crate::store::{self, Db, StoreError};
 use crate::svc::bound;
 use crate::svc::inventory::FLAG_CORP_MARKET;
-use crate::svc::rows::{index_rowset, row, rowset};
+use crate::svc::rows::{row, rowset};
 
 pub async fn registry(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
     Some(corp_registry(ctx, &call.method, &call.args).await)
@@ -245,12 +247,22 @@ async fn corp_registry(ctx: &Ctx<'_>, method: &str, args: &[Value]) -> Outcome {
         "GetRoleGroups" => role_groups(),
         "GetSharesByShareholder" => shares_by_shareholder(ctx, arg0.unwrap_or(0) != 0).await,
         "GetInfoWindowDataForChar" => info_window_data_for_char(ctx, arg0.unwrap_or(0)).await,
-        "GetTitles" => index_rowset(TITLE_HEADER, "titleID", Vec::new()),
+        "GetTitles" => titles::get_titles(ctx).await,
+        "UpdateTitle" => return titles::update_title(ctx, args).await.map_or_else(|e| e, Outcome::Value),
+        "UpdateTitles" => return titles::update_titles(ctx, args.first()).await.map_or_else(|e| e, Outcome::Value),
+        "DeleteTitle" => return titles::delete_title(ctx, arg0.unwrap_or(0)).await.map_or_else(|e| e, Outcome::Value),
         // The stations holding items locked down by a corporation vote.
         "GetLockedItemLocations" => crate::svc::votes::locked_locations(ctx).await,
         "GetMemberIDsWithMoreThanAvgShares" => Value::List(Vec::new()),
 
         "GetMembers" => members_rowset(ctx, corp).await,
+        "GetOffices" => views::offices(ctx).await,
+        "GetStations" => views::stations(ctx).await,
+        "GetMemberTrackingInfo" => return views::member_tracking(ctx, true).await,
+        "GetMemberTrackingInfoSimple" => return views::member_tracking(ctx, false).await,
+        "GetMemberIDsByQuery" => return views::member_ids_by_query(ctx, args).await,
+        "GetLockedItemsByLocation" => views::locked_items_by_location(ctx, arg0.unwrap_or(0)).await,
+        "GetRentalDetailsPlayer" | "GetRentalDetailsCorp" => views::rental_details(),
 
         _ => return Outcome::Unknown(format!("corpRegistry::{method}")),
     };
@@ -332,6 +344,7 @@ async fn member_lines(ctx: &Ctx<'_>, scope: MemberScope) -> Vec<(i64, Vec<Value>
                 let roles = db.table("chrCorporationRoles").get(std::slice::from_ref(c.value("characterID")));
                 let mask = |column: &str| Value::Long(roles.and_then(|r| r.int(column)).unwrap_or(0));
                 let mut line = c.line(&["characterID", "corporationID", "title", "corporationDateTime"]);
+                let title_mask = Value::Long(c.int("titleMask").unwrap_or(0) & titles::ALL_TITLES);
                 line.extend(
                     [
                         "rolesAtAll", "grantableRoles", "rolesAtHQ", "grantableRolesAtHQ",
@@ -340,7 +353,7 @@ async fn member_lines(ctx: &Ctx<'_>, scope: MemberScope) -> Vec<(i64, Vec<Value>
                     .map(mask),
                 );
                 // baseID, titleMask, divisionID, squadronID.
-                line.extend([corp.cell("stationID"), Value::Long(0), Value::Int(1), Value::Int(1)]);
+                line.extend([corp.cell("stationID"), title_mask, Value::Int(1), Value::Int(1)]);
                 Some((c.int("characterID").unwrap_or(0), line))
             })
             .collect();
@@ -370,6 +383,8 @@ async fn members_rowset(ctx: &Ctx<'_>, corp_id: i64) -> Value {
 
 /// The member list provider: Fetch(start, count) gives [(pk, line)],
 /// FetchByKey(pks) gives [(pk, position, line)].
+pub use views::offices_provider;
+
 pub async fn members_provider(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
     let corp_id = bound::parse(&call.service).and_then(|b| b.params.first().copied()).unwrap_or(0);
     if !matches!(call.method.as_str(), "Fetch" | "FetchByKey") {
@@ -662,10 +677,6 @@ fn int_lists(pairs: impl Iterator<Item = (i64, Value)>) -> Vec<(Value, Value)> {
     keys.into_iter().zip(vals).map(|(k, v)| (Value::Int(k), Value::List(v))).collect()
 }
 
-const TITLE_HEADER: &[&str] = &[
-    "titleID", "titleName", "roles", "grantableRoles", "rolesAtHQ", "grantableRolesAtHQ",
-    "rolesAtBase", "grantableRolesAtBase", "rolesAtOther", "grantableRolesAtOther",
-];
 
 async fn corp_station_mgr(
     ctx: &Ctx<'_>,

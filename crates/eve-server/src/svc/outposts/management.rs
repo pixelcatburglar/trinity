@@ -50,7 +50,7 @@ pub(super) fn authorize(ctx:&Ctx<'_>,db:&Db,station:i64)->Refused<()> {
     let place=db.table("staStations").get_id(station).ok_or("That station no longer exists.")?;
     if place.int("corporationID")!=Some(corp) {return Err("Your corporation does not own this station.".into());}
     let ceo=db.table("corporation").get_id(corp).and_then(|r|r.int("ceoID"));
-    let roles=db.table("chrCorporationRoles").get_id(pilot).map_or(0,|r|r.int("rolesAtAll").unwrap_or(0));
+    let roles=crate::svc::corp::titles::effective_roles(db,pilot)[0];
     if ceo!=Some(pilot) && roles&(ROLE_STATION_MANAGER|ROLE_DIRECTOR)==0 {
         return Err("Only current station managers, directors or the CEO may manage the station.".into());
     }

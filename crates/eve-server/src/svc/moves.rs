@@ -1,6 +1,7 @@
 //! Moving items between containers: the invcontainer writes Add, MultiAdd,
 //! MergeItems, MultiMerge and StackAll (invCache.py:621-763), ReplaceCharges
-//! (shipmodulebutton.py:311), and ship.AssembleShip (menusvc.py:2452).
+//! (shipmodulebutton.py:311), RemoveChargeToHangar/RemoveChargeToCargo
+//! (invCache.py:653 MakeDBLessItemReal), and ship.AssembleShip (menusvc.py:2452).
 //!
 //! A character can reach its own items in the station it is docked in (on the
 //! hangar floor, or one or two containers deep) or, in space, in its ship.
@@ -82,6 +83,25 @@ pub async fn container_write(ctx: &Ctx<'_>, container: Container, call: &Call) -
         "ReplaceCharges" => Op::ReplaceCharges { flag: flag(0), item: call.arg_id(1), quantity: call.arg_i64(2) },
         // Trinity fitting/slot.py removes permanent rigs through this call.
         "DestroyFitting" => Op::DestroyFitting(call.arg_id(0)),
+        // RemoveChargeToHangar/Cargo((shipID, flag, typeID), quantity=None):
+        // a loaded charge the client addresses by its slot becomes a real
+        // stack in the hangar or cargo; the client then Adds that itemID
+        // where it was dropped (invCache.py:653-668, chargescontainer.py:80).
+        "RemoveChargeToHangar" | "RemoveChargeToCargo" => {
+            let key = call.args.first().and_then(Value::seq).and_then(|k| match k {
+                [ship, flag, type_id] => Some((ship.as_i64()?, flag.as_i64()?, type_id.as_i64()?)),
+                _ => None,
+            });
+            let Some((ship, flag, type_id)) = key else { return Some(Outcome::custom("Invalid charge identifier.")) };
+            let quantity = match call.kwarg("quantity").or(call.args.get(1)) {
+                None | Some(Value::None) => None,
+                Some(v) => match v.as_i64() {
+                    Some(n) => Some(n),
+                    None => return Some(Outcome::custom("Invalid quantity.")),
+                },
+            };
+            Op::RemoveCharge { ship, flag, type_id, quantity, to_hangar: call.method == "RemoveChargeToHangar" }
+        }
         _ => return None,
     };
     Some(run(ctx, container, op).await)
@@ -100,6 +120,7 @@ enum Op {
     ReplaceCharges { flag: Option<i64>, item: i64, quantity: Option<i64> },
     Assemble(Vec<i64>),
     DestroyFitting(i64),
+    RemoveCharge { ship: i64, flag: i64, type_id: i64, quantity: Option<i64>, to_hangar: bool },
 }
 
 /// Run `op` in one item transaction and report the result to the client.
@@ -108,17 +129,17 @@ async fn run(ctx: &Ctx<'_>, container: Container, op: Op) -> Outcome {
     // The loadout before any fitting change, to report what it did.
     let mut fitting_before: Option<Snapshot> = None;
     let mut maintenance=super::maintenance::InventoryWrite::default();
-    let result: Result<(Vec<Value>, Vec<i64>), MoveError> = ctx.store.write(|tx| {
+    let result: Result<(Value, Vec<Value>, Vec<i64>), MoveError> = ctx.store.write(|tx| {
         let mut txn = ItemTxn::new(tx);
         let Some(pilot)=ctx.session.char_id.filter(|id|*id>0 && i32::try_from(*id).is_ok()) else{return refuse("No active character.");};
         if txn.db().table("character_").get_id(pilot).is_none(){return refuse("That character is unavailable.");}
-        apply(ctx, &mut txn, container, op, &mut fitting_before,&mut maintenance)?;
+        let value = apply(ctx, &mut txn, container, op, &mut fitting_before,&mut maintenance)?;
         maintenance.validate(ctx)?;
         let origins = txn.origins();
-        Ok((txn.events(), origins))
+        Ok((value, txn.events(), origins))
     });
     match result {
-        Ok((events, origins)) => {
+        Ok((value, events, origins)) => {
             maintenance.recipients.insert(ctx.client_id);
             {let w=ctx.world.lock();let recipients:Vec<_>=maintenance.recipients.iter().copied().collect();for event in events{w.notify(&recipients,"OnItemChange",event);}}
             // Keep host reservations through accepted custody and notifications.
@@ -134,7 +155,7 @@ async fn run(ctx: &Ctx<'_>, container: Container, op: Op) -> Outcome {
             if let Some(before) = fitting_before {
                 fitting::push_attribute_changes(ctx, &before).await;
             }
-            Outcome::Value(Value::None)
+            Outcome::Value(value)
         }
         Err(MoveError::Refused(why)) => {
             info!("move refused: {why}");
@@ -182,7 +203,7 @@ fn apply(
     op: Op,
     fitting_before: &mut Option<Snapshot>,
     maintenance:&mut super::maintenance::InventoryWrite,
-) -> Result<(), MoveError> {
+) -> Result<Value, MoveError> {
     match op {
         Op::Add { items, quantity, flag } => {
             if items.is_empty() || items.len()>100 || items.iter().copied().collect::<std::collections::BTreeSet<_>>().len()!=items.len(){return refuse("Select between one and one hundred distinct items.");}
@@ -235,8 +256,54 @@ fn apply(
             *fitting_before = Some(fitting::snapshot(txn.db(), ctx.dogma, me(ctx), Some(ship_id))?);
             txn.destroy(id)?;
         }
+        Op::RemoveCharge { ship, flag, type_id, quantity, to_hangar } => {
+            return remove_charge(ctx, txn, container, (ship, flag, type_id), quantity, to_hangar, fitting_before, maintenance)
+                .map(Value::Int);
+        }
     }
-    Ok(())
+    Ok(Value::None)
+}
+
+/// Turn the charge loaded at (ship, slot, type) into a stack in the hangar
+/// (docked) or the ship's cargo, and give its itemID.
+#[allow(clippy::too_many_arguments)]
+fn remove_charge(
+    ctx: &Ctx<'_>,
+    txn: &mut ItemTxn<'_, '_>,
+    container: Container,
+    (ship, flag, type_id): (i64, i64, i64),
+    quantity: Option<i64>,
+    to_hangar: bool,
+    fitting_before: &mut Option<Snapshot>,
+    maintenance: &mut super::maintenance::InventoryWrite,
+) -> Result<i64, MoveError> {
+    // The call is made on the ship's own inventory (invCache.py:654).
+    if container != Container::Item(ship) || ctx.session.ship_id != Some(ship) {
+        return refuse("You can only unload charges from your active ship.");
+    }
+    if !fitting::is_slot(flag) {
+        return refuse("That is not a module slot.");
+    }
+    let charge_types = crate::sde::get().types_in_category(category::CHARGE);
+    if !i32::try_from(type_id).is_ok_and(|t| charge_types.binary_search(&t).is_ok()) {
+        return refuse("That is not a charge.");
+    }
+    // The largest stack of that charge in the slot.
+    let found = txn
+        .db()
+        .table("entity")
+        .find(&["locationID", "flag"], &[store::Value::Int(ship), store::Value::Int(flag)])
+        .filter(|e| e.int("typeID") == Some(type_id))
+        .filter_map(|e| Some((e.int("quantity").unwrap_or(0), e.int("itemID")?)))
+        .max();
+    let Some((_, charge)) = found else { return refuse("Those charges are no longer loaded.") };
+    let (target, dest_flag) = if to_hangar {
+        (Container::Special { container_id: CONTAINER_HANGAR, owner_id: None }, None)
+    } else {
+        (Container::Item(ship), Some(FLAG_CARGO))
+    };
+    let dest = destination(ctx, txn, target, dest_flag, maintenance)?;
+    add(ctx, txn, &dest, charge, quantity, fitting_before, maintenance)
 }
 
 fn assemble(ctx: &Ctx<'_>, txn: &mut ItemTxn<'_, '_>, ids: &[i64]) -> Result<(), MoveError> {
@@ -496,7 +563,7 @@ fn add(
     quantity: Option<i64>,
     fitting_before: &mut Option<Snapshot>,
     maintenance:&mut super::maintenance::InventoryWrite,
-) -> Result<(), MoveError> {
+) -> Result<i64, MoveError> {
     let Some(item) = txn.item(id)? else { return refuse("That item no longer exists.") };
     let source_bay=maintenance.source(ctx,txn,&item)?;
     if source_bay.is_none() && !reachable(ctx, txn, &item)? {
@@ -506,7 +573,7 @@ fn add(
     if quantity<=0 || quantity>item.quantity || (item.singleton && quantity!=1){return refuse("The requested quantity is not available.");}
     if item.location_id == dest.location && item.flag == dest.flag && quantity==item.quantity {
         if let Some(bay)=dest.bay{maintenance.accepts(ctx,txn,bay,&item,item.quantity)?;}
-        return Ok(());
+        return Ok(item.id);
     }
     if fitting::is_slot(item.flag) {
         let now=crate::combat::now_ms();
@@ -544,7 +611,7 @@ fn add(
         *fitting_before = Some(fitting::snapshot(txn.db(), ctx.dogma, me(ctx), ctx.session.ship_id)?);
     }
     if let Some(ship) = &dest.fitting {
-        return fitting::fit(ctx, txn, ship, &item, dest.flag, Some(quantity));
+        return fitting::fit(ctx, txn, ship, &item, dest.flag, Some(quantity)).map(|_| item.id);
     }
     if fitting::is_slot(item.flag) && item.category_id == category::MODULE {
         if ctx.session.station_id.is_none() {
@@ -565,7 +632,7 @@ fn add(
     if quantity < item.quantity {
         txn.set_quantity(item.id, item.quantity - quantity)?;
         let new = NewItem { location_id: dest.location, flag: dest.flag, quantity, singleton: false, owner_id: owner, ..new_like(&item) };
-        txn.create(new)?;
+        return Ok(txn.create(new)?);
     } else {
         txn.move_to(item.id, dest.location, dest.flag)?;
         if item.owner_id != owner {
@@ -574,7 +641,7 @@ fn add(
             }
         }
     }
-    Ok(())
+    Ok(item.id)
 }
 
 fn merge(

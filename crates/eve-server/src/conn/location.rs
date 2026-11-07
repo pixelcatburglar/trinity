@@ -1163,13 +1163,13 @@ impl Conn {
             let c = db.table("character_").get_id(char_id)?;
             let corp_id = c.int("corporationID");
             let corp = corp_id.and_then(|id| db.table("corporation").get_id(id));
-            let roles = db.table("chrCorporationRoles").get_id(char_id);
-            let role = |column: &str| roles.and_then(|r| r.int(column)).unwrap_or(0);
+            // Their own roles and their titles' (svc/corp/titles.rs).
+            let roles = crate::svc::corp::titles::effective_roles(db, char_id);
             Some((
                 corp_id,
                 corp.and_then(|co| co.int("allianceID")),
                 corp.and_then(|co| co.int("stationID")),
-                [role("rolesAtAll"), role("rolesAtHQ"), role("rolesAtBase"), role("rolesAtOther")],
+                roles,
                 c.int("corpAccountKey"),
             ))
         });
