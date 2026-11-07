@@ -56,6 +56,8 @@ pub use training::run as run_training;
 /// The skill history's events, as the character sheet names them
 /// (charactersheet.py `ShowMySkillHistory`).
 pub mod history {
+    use std::collections::HashSet;
+
     use eve_marshal::Value;
 
     use crate::store::{Db, StoreError, Tx, Value as Cell};
@@ -87,11 +89,33 @@ pub mod history {
         .map(|_| ())
     }
 
-    /// skillMgr.GetSkillHistory: a rowset of the pilot's entries, newest first.
-    pub fn of(db: &Db, char_id: i64) -> Value {
-        let rows: Vec<_> = db.table("skillHistory").find(&["characterID"], &[Cell::Int(char_id)]).collect();
+    /// skillMgr.GetSkillHistory: a rowset of the pilot's entries, newest
+    /// first. The client looks each entry's skill up in its own skill list
+    /// and fails on one it lacks (charactersheet.py `ShowMySkillHistory`),
+    /// so only skills the pilot has are listed, less those in `unseen` (the
+    /// client's list predates them; see `WorldState::skills_unseen`).
+    pub fn of(db: &Db, char_id: i64, unseen: &HashSet<i64>) -> Value {
+        let known: HashSet<i64> = db
+            .table("entity")
+            .find(&["locationID"], &[Cell::Int(char_id)])
+            .filter(|e| matches!(e.int("flag"), Some(f) if f == i64::from(super::FLAG_SKILL) || f == i64::from(super::FLAG_SKILL_IN_TRAINING)))
+            .filter(|e| e.int("singleton") == Some(1))
+            .filter_map(|e| e.int("typeID"))
+            .filter(|t| !unseen.contains(t))
+            .collect();
+        let rows: Vec<_> = db
+            .table("skillHistory")
+            .find(&["characterID"], &[Cell::Int(char_id)])
+            .filter(|r| r.int("skillTypeID").is_some_and(|t| known.contains(&t)))
+            .collect();
         let lines = rows.iter().rev().take(SHOWN).map(|r| Value::List(r.line(&COLUMNS))).collect();
         crate::svc::rows::rowset(&COLUMNS, lines)
+    }
+
+    /// The skill types `client_id` must not be shown history for yet.
+    pub fn unseen(world: &crate::world::World, client_id: i64, char_id: i64) -> HashSet<i64> {
+        let w = world.lock();
+        w.skills_unseen.get(&client_id).map_or_else(HashSet::new, |s| s.iter().filter(|(c, _)| *c == char_id).map(|(_, t)| *t).collect())
     }
 }
 
@@ -113,9 +137,10 @@ async fn method_call(method: &str, args: &[Value], ctx: &Ctx<'_>) -> Outcome {
         }
         "GetSkillHistory" => {
             let char_id = ctx.session.char_id.unwrap_or(0);
-            Outcome::Value(ctx.store.read(|db| history::of(db, char_id)))
+            let unseen = history::unseen(ctx.world, ctx.client_id, char_id);
+            Outcome::Value(ctx.store.read(|db| history::of(db, char_id, &unseen)))
         }
-        "CharStartTrainingSkill" => Outcome::Value(training::start(ctx, item_id).await),
+        "CharStartTrainingSkill" => training::start(ctx, item_id).await,
         "CharStopTrainingSkill" => Outcome::Value(training::stop(ctx, item_id).await),
         "CharAddImplant" => change_implant(ctx, item_id, false).await,
         "CharUseBooster" => super::boosters::consume(ctx,args).await,

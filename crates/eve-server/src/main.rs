@@ -139,7 +139,7 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     info!("listening on {} as node {}", config.bind, config.node_id);
 
     tokio::spawn(checkpoints(Arc::clone(&store)));
-    tokio::spawn(svc::skills::run_training(Arc::clone(&store), server.world.clone()));
+    tokio::spawn(svc::skills::run_training(Arc::clone(&server)));
 
     let mut seq = 0i64;
     let mut stop = std::pin::pin!(shutdown());

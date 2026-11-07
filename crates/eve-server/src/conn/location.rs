@@ -152,12 +152,21 @@ const JUMP_OUT_TIME: Duration = Duration::from_secs(3);
 const DOCK_RANGE: f64 = 2_500.0;
 /// The longest a docking approach may take before the request is refused.
 const DOCK_APPROACH_LIMIT: i64 = 600;
+/// How long the station takes to clear a docking request. The client plays
+/// its "docking requested" line as it asks; answering at once would play
+/// "docking accepted" over it.
+const DOCK_CLEARANCE: Duration = Duration::from_millis(2_500);
 
+/// A docking request the station has not answered yet: the ship is flying
+/// in (`approaching`), or is in range and waiting for clearance.
 pub(super) struct DockingApproach {
     request: MachoPacket,
     system: i64,
     ship: i64,
     station: i64,
+    approaching: bool,
+    /// Not accepted before this, however close the ship is.
+    not_before: std::time::Instant,
     deadline: std::time::Instant,
 }
 
@@ -393,6 +402,12 @@ impl Conn {
     }
 
     pub(super) async fn dock(&mut self, req: &MachoPacket, station_id: i64, towed: bool) -> Result {
+        self.dock_as(req, station_id, towed, false).await
+    }
+
+    /// Dock, or start the approach or the wait for clearance; `cleared`
+    /// when that wait is over.
+    async fn dock_as(&mut self, req: &MachoPacket, station_id: i64, towed: bool, cleared: bool) -> Result {
         self.cancel_docking("A new docking request replaced the previous approach.")
             .await?;
         let denied =
@@ -499,8 +514,25 @@ impl Conn {
                 system: system_id,
                 ship: ship_id,
                 station: station_id,
+                approaching: true,
+                not_before: std::time::Instant::now() + DOCK_CLEARANCE,
                 deadline: std::time::Instant::now()
                     + Duration::from_secs(DOCK_APPROACH_LIMIT as u64),
+            });
+            return Ok(());
+        }
+
+        // In range: the station answers after a moment (`poll_docking`).
+        if !towed && !cleared {
+            let now = std::time::Instant::now();
+            self.pending_dock = Some(DockingApproach {
+                request: req.clone(),
+                system: system_id,
+                ship: ship_id,
+                station: station_id,
+                approaching: false,
+                not_before: now + DOCK_CLEARANCE,
+                deadline: now + Duration::from_secs(DOCK_APPROACH_LIMIT as u64),
             });
             return Ok(());
         }
@@ -517,9 +549,11 @@ impl Conn {
                 Value::Double(v.z),
             ])
         };
+        // Sent directly, ahead of the session change: queued, it reached the
+        // client after it had docked and left "Docking" on the screen.
         if let Some((start,end,station))=arrived.docking {
             let accepted=Value::Tuple(vec![point(start),point(end),Value::Int(station)]);
-            self.server.world.lock().notify(&[self.client_id],"OnDockingAccepted",accepted);
+            self.send_notification(&crate::world::Notification{event:"OnDockingAccepted",args:accepted}).await?;
         }
 
         let before = self.session.clone();
@@ -573,7 +607,8 @@ impl Conn {
             world.parks.get_mut(&pending.system).and_then(|park| {
                 park.advance(destiny::tick_now());
                 let ship=park.ships.get(&pending.ship)?;
-                if ship.client_id!=self.client_id || ship.warping() || ship.identity_reserved || !matches!(ship.command,Command::Follow {target,..} if target==pending.station) {return None;}
+                let on_course=!pending.approaching || matches!(ship.command,Command::Follow {target,..} if target==pending.station);
+                if ship.client_id!=self.client_id || ship.warping() || ship.identity_reserved || !on_course {return None;}
                 park.surface_distance(pending.ship,pending.station)
             })
         } else {
@@ -585,8 +620,14 @@ impl Conn {
                     .await
             }
             Some(gap) if gap <= DOCK_RANGE => {
+                if std::time::Instant::now() < pending.not_before {
+                    return Ok(());
+                }
                 let pending = self.pending_dock.take().expect("checked above");
-                self.dock(&pending.request, pending.station, false).await
+                self.dock_as(&pending.request, pending.station, false, true).await
+            }
+            Some(_) if !pending.approaching => {
+                self.cancel_docking("Your ship left docking range.").await
             }
             _ => Ok(()),
         }

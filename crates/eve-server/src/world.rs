@@ -128,6 +128,12 @@ pub struct WorldState {
     /// the heartbeat together with its own jobs.
     pub pending_jobs: Vec<crate::heartbeat::Job>,
     pub gangs: crate::svc::gang::Gangs,
+    /// Skills injected since each client last refreshed its skill list
+    /// (client -> (character, skill type)). The client's `skills` service
+    /// keeps a snapshot it renews only when a skill finishes or it logs in,
+    /// and its skill history crashes on a skill missing from it, so the
+    /// history leaves these out until then (`skills::history::of`).
+    pub skills_unseen: HashMap<i64, HashSet<(i64, i64)>>,
     /// The online bots by solar system: (in space, docked), for the star map.
     pub bot_counts: HashMap<i64, (i64, i64)>,
     /// How the bot population stands, for the web dashboard.
@@ -293,6 +299,7 @@ impl WorldState {
             crate::svc::gang::logged_off(self, char_id);
         }
         self.clients.remove(&client_id);
+        self.skills_unseen.remove(&client_id);
         let mut left = Vec::new();
         for channel in self.channels.values_mut() {
             if channel.members.remove(&client_id) {
