@@ -90,7 +90,9 @@ pub async fn beyonce(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
         "GetGangLocationAndInfo" => crate::svc::fleet::location_info(&ctx.world.lock(), ctx.session.char_id.unwrap_or(0)),
         "GangRegroup" => return Some(crate::svc::fleet::regroup(&mut ctx.world.lock(), ctx.session.char_id.unwrap_or(0))
             .map_or_else(|e| e, Outcome::Value)),
-        "ConeScan" | "GetScans" | "CombineScans" | "GiveProbe" => return crate::svc::scan::beyonce(call, ctx).await,
+        "ConeScan" | "GetScans" | "CombineScans" | "GiveProbe" | "DestroyProbe" => return crate::svc::scan::beyonce(call, ctx).await,
+        // GotoBookmark(bookmarkID): the address book's Approach (addressbook.py:1087-1091).
+        "GotoBookmark" => return Some(goto_bookmark(ctx, call.arg_id(0)).await),
         // BridgeToMember(charID, beaconID, solarsystemID): a titan's portal.
         "BridgeToMember" => {
             return Some(match crate::svc::jumps::open_bridge(ctx, call.arg_id(0), call.arg_id(1), call.arg_id(2)).await {
@@ -114,7 +116,7 @@ pub async fn beyonce(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
 pub fn is_movement(method: &str) -> bool {
     matches!(
         method,
-        "SetSpeedFraction" | "GotoDirection" | "GotoPoint" | "Stop" | "FollowBall" | "Orbit" | "WarpToStuff"
+        "SetSpeedFraction" | "GotoDirection" | "GotoPoint" | "Stop" | "FollowBall" | "Orbit" | "WarpToStuff" | "WarpToTutorial"
     )
 }
 
@@ -893,7 +895,8 @@ async fn movement(ctx: &Ctx<'_>, call: &Call) -> Outcome {
     let (Some(system), Some(ship_id)) = (ctx.session.solar_system_id, ctx.session.ship_id) else {
         return Outcome::UserError { msg: "ShipNotYours".into(), args: Vec::new() };
     };
-    if call.method == "WarpToStuff" && call.arg_text(0).as_deref() == Some("tutorial") {
+    // The neocom's tutorial button calls WarpToTutorial() (neocom.py:1329-1333).
+    if call.method == "WarpToTutorial" || (call.method == "WarpToStuff" && call.arg_text(0).as_deref() == Some("tutorial")) {
         return warp_to_tutorial(ctx, call, system, ship_id);
     }
     let Some(order) = parse_order(ctx, call).await else {
@@ -976,6 +979,15 @@ fn warp_to_tutorial(ctx: &Ctx<'_>, call: &Call, system: i64, ship_id: i64) -> Ou
         (at, radius)
     };
     warp_to_point(ctx, at, radius, range, "WarpToStuff")
+}
+
+/// GotoBookmark(bookmarkID): fly straight at one of the pilot's bookmarks in
+/// this system, as found for a warp to it.
+async fn goto_bookmark(ctx: &Ctx<'_>, bookmark: i64) -> Outcome {
+    match warp_target(ctx, "bookmark", bookmark).await {
+        Some((at, _)) => approach_point(ctx, at, "GotoBookmark"),
+        None => Outcome::custom("That bookmark is not in this solar system."),
+    }
 }
 
 /// Flies the caller's ship straight to `at`.

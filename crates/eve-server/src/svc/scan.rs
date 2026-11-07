@@ -94,6 +94,11 @@ pub async fn beyonce(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
             Ok(()) => Outcome::Value(Value::None),
             Err(why) => Outcome::custom(why),
         },
+        // DestroyProbe(probeID): the scanner's menu (scanner.py:632-644).
+        "DestroyProbe" => match destroy(ctx, me, call.arg_id(0)) {
+            Ok(()) => Outcome::Value(Value::None),
+            Err(why) => Outcome::custom(why),
+        },
         _ => return None,
     })
 }
@@ -189,6 +194,32 @@ fn give(ctx: &Ctx<'_>, me: i64, to: i64, probe: i64) -> Result<(), String> {
     let Some(p) = w.probes.get_mut(&probe).filter(|p| p.owner == me) else { return Err("That is not your probe.".into()) };
     p.owner = to;
     info!("{me} gave probe {probe} to {to}");
+    Ok(())
+}
+
+/// Survey probes destroyed before their survey, which then does not run.
+fn destroyed() -> &'static std::sync::Mutex<std::collections::HashSet<i64>> {
+    static IDS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i64>>> = std::sync::OnceLock::new();
+    IDS.get_or_init(Default::default)
+}
+
+/// A pilot destroys one of their probes: it leaves the scanner and space.
+fn destroy(ctx: &Ctx<'_>, me: i64, probe: i64) -> Result<(), String> {
+    let mut w = ctx.world.lock();
+    let Some(p) = w.probes.get(&probe).filter(|p| p.owner == me) else { return Err("That is not your probe.".into()) };
+    let system = p.system;
+    let survey = p.type_id;
+    w.probes.remove(&probe);
+    if crate::sde::get().type_(survey).is_some_and(|t| i64::from(t.group_id) == GROUP_SURVEY_PROBE) {
+        destroyed().lock().unwrap_or_else(|e| e.into_inner()).insert(probe);
+    }
+    if let Some(park) = w.parks.get_mut(&system) {
+        let entries = beacons::remove(park, &[probe]);
+        if !entries.is_empty() {
+            crate::svc::space::broadcast(&w, system, None, entries);
+        }
+    }
+    info!("{me} destroyed probe {probe}");
     Ok(())
 }
 
@@ -450,6 +481,9 @@ async fn launch_probe(ctx: &Ctx<'_>, me: i64, system: i64, ship_id: i64, flag: i
         let (world, store, client) = (ctx.world.clone(), Arc::clone(ctx.store), ctx.client_id);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(lifetime as u64)).await;
+            if destroyed().lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+                return;
+            }
             if let Err(e) = survey_moons(&world, &store, client, me, system, pos, probe.range * AU) {
                 tracing::error!("moon survey: {}", crate::logging::chain(&e));
             }

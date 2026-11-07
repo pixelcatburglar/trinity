@@ -38,7 +38,7 @@ const FOUNDER_SHARES: i64 = 1000;
 const SKILL_CORPORATION_MANAGEMENT: i32 = 3363;
 /// The skills that raise a CEO's member limit, and by how much per level
 /// (Corporation Management, Megacorp Management, Empire Control, Sovereignty).
-const MEMBER_SKILLS: [(i32, i64); 4] = [(3363, 10), (3731, 50), (3732, 200), (12241, 1000)];
+pub(crate) const MEMBER_SKILLS: [(i32, i64); 4] = [(3363, 10), (3731, 50), (3732, 200), (12241, 1000)];
 
 const APPLICATION_HEADER: &[&str] =
     &["corporationID", "characterID", "applicationText", "applicationDateTime", "status"];
@@ -90,6 +90,7 @@ pub async fn corp_registry(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
             update_member(ctx, call.arg_id(0), call.arg_text(1), &roles, call.arg_i64(13)).await
         }
         "UpdateMembers" => update_members(ctx, call.args.first()).await,
+        "ExecuteActions" => execute_actions(ctx, call.args.first(), call.args.get(1)).await,
         "CanBeKickedOut" => Ok(Value::Bool(can_be_kicked_out(ctx, call.arg_id(0)))),
         "UpdateDivisionNames" => crate::svc::corphangar::update_division_names(ctx, &call.args).await.map_err(Outcome::custom),
         "UpdateCorporation" => crate::svc::corphangar::update_corporation(ctx, &call.args).await.map_err(Outcome::custom),
@@ -556,6 +557,141 @@ async fn update_members(ctx: &Ctx<'_>, rows: Option<&Value>) -> Refused<Value> {
         update_member(ctx, char_id, title, &roles, l.get(13).and_then(|v| v.as_i64())).await?;
     }
     Ok(Value::None)
+}
+
+/// corp_ui_member_view_task_mgt.py / eveConstants CTV_* and CTPG_*.
+const CTV_ADD: i64 = 1;
+const CTV_REMOVE: i64 = 2;
+const CTV_SET: i64 = 3;
+const CTV_GIVE: i64 = 4;
+const CTPG_CASH: i64 = 6;
+const CTPG_SHARES: i64 = 7;
+/// market_refTypes refCorporationAccountWithdrawal.
+const REF_CORPORATION_ACCOUNT_WITHDRAWAL: i32 = 37;
+
+/// The bitmask properties an action adds to or removes from, as
+/// UpdateMember's role arguments are ordered (`ROLE_COLUMNS`).
+const ACTION_ROLE_PROPERTIES: [&str; 8] = [
+    "roles", "grantableRoles", "rolesAtHQ", "grantableRolesAtHQ",
+    "rolesAtBase", "grantableRolesAtBase", "rolesAtOther", "grantableRolesAtOther",
+];
+
+/// What one ExecuteActions action does to every target.
+enum Action {
+    /// Add (true) or remove the bits of one role column (`ROLE_COLUMNS` index).
+    Role(usize, bool, i64),
+    Titles(bool, i64),
+    Base(Option<i64>),
+    Cash(f64),
+    Shares(i64),
+}
+
+fn parse_action(a: &Value) -> Option<Action> {
+    let [verb, property, value] = a.seq()? else { return None };
+    let verb = verb.as_i64()?;
+    let add = verb == CTV_ADD;
+    match (verb, property) {
+        (CTV_ADD | CTV_REMOVE, p) => {
+            let name = p.as_string()?;
+            let bits = value.as_i64()?;
+            if name == "titleMask" {
+                return Some(Action::Titles(add, bits));
+            }
+            ACTION_ROLE_PROPERTIES.iter().position(|r| *r == name).map(|i| Action::Role(i, add, bits))
+        }
+        (CTV_SET, p) if p.as_string().as_deref() == Some("baseID") => Some(Action::Base(value.as_i64().filter(|b| *b > 0))),
+        (CTV_GIVE, p) if p.as_i64() == Some(CTPG_CASH) => value.as_f64().filter(|v| v.is_finite() && *v > 0.0).map(Action::Cash),
+        (CTV_GIVE, p) if p.as_i64() == Some(CTPG_SHARES) => value.as_i64().filter(|v| *v > 0).map(Action::Shares),
+        _ => None,
+    }
+}
+
+/// ExecuteActions(targetIDs, actions): the member task manager's actions,
+/// [verb, property, value] each, applied to every target in turn
+/// (corp_ui_member_view_task_mgt.py:150-159; bco_members.py:181-194 keeps
+/// chat and mail invitations on the client). Roles and titles go through
+/// UpdateMember, with its rules; cash comes from the corporation's wallet and
+/// shares from the corporation's own holding.
+async fn execute_actions(ctx: &Ctx<'_>, targets: Option<&Value>, actions: Option<&Value>) -> Refused<Value> {
+    let targets: Vec<i64> = targets.and_then(Value::seq).unwrap_or(&[]).iter().filter_map(Value::as_i64).collect();
+    let actions: Vec<Action> = actions
+        .and_then(Value::seq)
+        .unwrap_or(&[])
+        .iter()
+        .map(|a| parse_action(a).ok_or_else(|| Outcome::custom("One of those actions cannot be carried out.")))
+        .collect::<Refused<_>>()?;
+    if targets.is_empty() || actions.is_empty() {
+        return Ok(Value::None);
+    }
+    if targets.len() > 1000 || actions.len() > 50 {
+        return Err(Outcome::custom("Choose fewer members or actions."));
+    }
+    let corp_id = ctx.session.corp_id.unwrap_or(0);
+    let me = ctx.session.char_id.unwrap_or(0);
+    let ceo = ctx.store.read(|db| db.table("corporation").get_id(corp_id).and_then(|c| c.int("ceoID")));
+    if ceo != Some(me) && !ctx.session.has_corp_role(CORP_ROLE_DIRECTOR) {
+        return Err(access_denied("only the CEO and directors may act on members"));
+    }
+    for &target in &targets {
+        let current = ctx.store.read(|db| {
+            let c = db.table("character_").get_id(target).filter(|c| c.int("corporationID") == Some(corp_id))?;
+            let roles = db.table("chrCorporationRoles").get_id(target);
+            Some((ROLE_COLUMNS.map(|col| roles.and_then(|r| r.int(col)).unwrap_or(0)), c.int("titleMask").unwrap_or(0)))
+        });
+        let Some((mut roles, mut titles)) = current else { return Err(message("CrpCharNotInThisCorp")) };
+        let (before_roles, before_titles) = (roles, titles);
+        for action in &actions {
+            match *action {
+                Action::Role(i, add, bits) => roles[i] = if add { roles[i] | bits } else { roles[i] & !bits },
+                Action::Titles(add, bits) => titles = if add { titles | bits } else { titles & !bits },
+                Action::Base(base) => set_base(ctx, corp_id, target, base)?,
+                Action::Cash(amount) => {
+                    let payment = crate::svc::wallet::Payment {
+                        payer: corp_id,
+                        payee: Some(target),
+                        amount,
+                        ref_type: REF_CORPORATION_ACCOUNT_WITHDRAWAL,
+                        arg_id1: "",
+                        reason: "",
+                    };
+                    crate::svc::wallet::move_cash(ctx.store, payment).await.map_err(transfer_refused)?;
+                    wallet::notify_balance(ctx, corp_id).await;
+                    wallet::notify_balance(ctx, target).await;
+                }
+                Action::Shares(n) => {
+                    let args = [Value::Int(corp_id), Value::Int(target), Value::Int(n)];
+                    crate::svc::corp::shares::move_shares(ctx, &args, true).await?;
+                }
+            }
+        }
+        if roles != before_roles || titles != before_titles {
+            let changed: Vec<Option<i64>> = roles.iter().zip(before_roles).map(|(r, b)| (*r != b).then_some(*r)).collect();
+            update_member(ctx, target, None, &changed, (titles != before_titles).then_some(titles)).await?;
+        }
+    }
+    info!("{me} carried out {} action(s) on {} member(s) of {corp_id}", actions.len(), targets.len());
+    Ok(Value::None)
+}
+
+/// A member's base: one of the corporation's office stations, or none.
+fn set_base_checked(db: &Db, corp_id: i64, base: Option<i64>) -> bool {
+    base.is_none_or(|station| db.table("crpOffices").find(&["stationID"], &[int(station)]).any(|o| o.int("corporationID") == Some(corp_id)))
+}
+
+fn set_base(ctx: &Ctx<'_>, corp_id: i64, char_id: i64, base: Option<i64>) -> Refused<()> {
+    ctx.store
+        .write(|tx| -> Result<(), Undone> {
+            if !set_base_checked(tx.db(), corp_id, base) {
+                return Err(Outcome::custom("A member's base must be a station where the corporation has an office.").into());
+            }
+            if let Some(row) = tx.table("character_").get_id(char_id).map(|c| c.id) {
+                tx.update("character_", row, &[("baseID", base.map_or(store::Value::Null, int))])?;
+            }
+            Ok(())
+        })
+        .map_err(|Undone(o)| o)?;
+    ctx.world.lock().reaffiliate(&[], &[char_id]);
+    Ok(())
 }
 
 fn can_be_kicked_out(ctx: &Ctx<'_>, char_id: i64) -> bool {

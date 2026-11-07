@@ -555,6 +555,63 @@ fn update(world: &World, system: i64, id: i64, f: impl FnOnce(&mut Structure, i6
     space::broadcast(&w, system, None, entries);
 }
 
+/// dgmAttributeTypes posPlayerControlStructure: a structure a pilot can man.
+const ATTR_PLAYER_CONTROL: i32 = 1167;
+/// eveConstants corpRoleStarbaseCaretaker.
+const CORP_ROLE_STARBASE_CARETAKER: i64 = 1 << 58;
+
+/// posMgr.AssumeStructureControl(itemID) / RelinquishStructureControl(itemID)
+/// (playerOwned.py:355-393): a member of the owning corporation with a
+/// starbase role (or a director) takes over one of its online weapons while
+/// on grid with it; one pilot at a time, unless the last one has left.
+/// The controller is shown to everyone through the slim item.
+fn control(ctx: &Ctx<'_>, id: i64, assume: bool) -> Refused<Value> {
+    let (Some(system), Some(ship_id), Some(me)) = (ctx.session.solar_system_id, ctx.session.ship_id, ctx.session.char_id) else {
+        return Err(Outcome::custom("You must be in space."));
+    };
+    let mut w = ctx.world.lock();
+    let Some(park) = w.parks.get_mut(&system) else { return Err(Outcome::custom("That structure is not here.")) };
+    let Some(s) = park.structures.get(&id) else { return Err(Outcome::custom("That structure is not here.")) };
+    if !assume {
+        if s.controller != Some(me) {
+            return Err(Outcome::custom("You are not in control of that structure."));
+        }
+    } else {
+        if crate::sde::get().type_attribute(s.type_id, ATTR_PLAYER_CONTROL).unwrap_or(0.0) == 0.0 {
+            return Err(Outcome::custom("That structure cannot be controlled."));
+        }
+        if ctx.session.corp_id != Some(s.corp_id) {
+            return Err(access_denied("only the owning corporation may control its structures"));
+        }
+        let role = [CORP_ROLE_STARBASE_CARETAKER, CORP_ROLE_STARBASE_CONFIG, CORP_ROLE_DIRECTOR].iter().any(|r| ctx.session.has_corp_role(*r));
+        if !role {
+            return Err(access_denied("controlling starbase structures needs a starbase role"));
+        }
+        if !matches!(s.state, pos::state::ONLINE | pos::state::OPERATING) {
+            return Err(Outcome::custom("That structure must be online to be controlled."));
+        }
+        if park.surface_distance(ship_id, id).is_none_or(|d| d > space::GRID_RANGE) {
+            return Err(Outcome::custom("You are too far away to control that structure."));
+        }
+        // Someone else still flying here keeps it.
+        let held = s.controller.filter(|c| *c != me && park.ships.values().any(|ship| ship.pilot.char_id == *c && ship.is_pilot()));
+        if let Some(other) = held {
+            return Err(Outcome::custom(format!("That structure is already controlled by another pilot ({other}).")));
+        }
+    }
+    let tick = park.tick;
+    let Some(s) = park.structures.get_mut(&id) else { return Err(Outcome::custom("That structure is not here.")) };
+    let want = assume.then_some(me);
+    if s.controller == want {
+        return Ok(Value::None);
+    }
+    s.controller = want;
+    let entry = pos::slim_change(tick, s);
+    space::broadcast(&w, system, None, vec![entry]);
+    info!("{me} {} structure {id}", if assume { "took control of" } else { "released" });
+    Ok(Value::None)
+}
+
 /// A structure, and if it is a tower everything drawing on it, goes offline.
 pub async fn take_offline(store: &Store, world: &World, system: i64, id: i64) {
     let offline = store.write(|tx| {
@@ -1141,6 +1198,8 @@ pub async fn pos_mgr(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
         }
         // SetShipPassword(password): the ship's harmonic, until it leaves space.
         "SetShipPassword" => ship_password(ctx, &call.arg_text(0).unwrap_or_default()),
+        "AssumeStructureControl" => control(ctx, call.arg_id(0), true),
+        "RelinquishStructureControl" => control(ctx, call.arg_id(0), false),
         "GetStarbasePermissions" => Ok(permissions(ctx, tower).await),
         "SetStarbasePermissions" => set_permissions(ctx, tower, call).await,
         "GetMoonProcessInfoForTower" => Ok(moonmining::process_info(ctx, tower).await),

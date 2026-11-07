@@ -108,6 +108,10 @@ pub struct Structure {
     pub guard: Option<crate::guard::Guard>,
     /// A jump array's linked endpoint: (structure, system, type).
     pub bridge: Option<(i64, i64, i64)>,
+    /// The character manning it (posMgr.AssumeStructureControl), shown as
+    /// the slim item's controllerID (playerOwned.py:357-410). Not saved: a
+    /// restart leaves every structure unmanned.
+    pub controller: Option<i64>,
 }
 
 /// A tower's force field: a ball of its own (type Force Field), centred on
@@ -247,6 +251,7 @@ impl Structure {
             ("posTimestamp", self.stamp.map_or(Value::None, Value::Long)),
             ("controlTowerID", Value::int_or_none(self.tower)),
             ("incapacitated", Value::Int(0)),
+            ("controllerID", Value::int_or_none(self.controller)),
             ("remoteStructureID", Value::int_or_none(self.bridge.map(|bridge| bridge.0))),
             ("remoteSystemID", Value::int_or_none(self.bridge.map(|bridge| bridge.1))),
         ])
@@ -361,6 +366,7 @@ pub fn load(db: &Db, solar_system_id: i64) -> Result<Vec<Structure>, StoreError>
                 allow_corp: flag("allowCorp", 1),
                 allow_alliance: flag("allowAlliance", 0),
                 field: None,
+                controller: None,
                 sentry: crate::guard::Sentry {
                     standing: p.and_then(|p| p.float("sentryStanding")),
                     status: p.and_then(|p| p.float("sentryStatus")),

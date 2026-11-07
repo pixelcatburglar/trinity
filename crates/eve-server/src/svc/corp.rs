@@ -1,6 +1,8 @@
 mod offices;
 pub(crate) mod titles;
 pub(crate) mod views;
+pub(crate) mod shares;
+mod details;
 pub(crate) use offices::{ensure_schema as ensure_office_schema,ensure_slots_locked as ensure_office_slots_locked};
 
 use eve_marshal::Value;
@@ -245,7 +247,16 @@ async fn corp_registry(ctx: &Ctx<'_>, method: &str, args: &[Value]) -> Outcome {
             rowset(ROLE_HEADER, roles.iter().map(role_line).collect())
         }
         "GetRoleGroups" => role_groups(),
-        "GetSharesByShareholder" => shares_by_shareholder(ctx, arg0.unwrap_or(0) != 0).await,
+        "GetSharesByShareholder" => shares::shares_by_shareholder(ctx, arg0.unwrap_or(0) != 0).await,
+        "GetShareholders" => return shares::shareholders(ctx, arg0.unwrap_or(0)).await,
+        "MoveCompanyShares" => return shares::move_shares(ctx, args, true).await.map_or_else(|e| e, Outcome::Value),
+        "MovePrivateShares" => return shares::move_shares(ctx, args, false).await.map_or_else(|e| e, Outcome::Value),
+        "PayoutDividend" => return shares::payout_dividend(ctx, args).await.map_or_else(|e| e, Outcome::Value),
+        "UpdateLogo" => return details::update_logo(ctx, args).await.map_or_else(|e| e, Outcome::Value),
+        "UpdateCorporationAbilities" => return details::update_abilities(ctx).await.map_or_else(|e| e, Outcome::Value),
+        "GetRecentKillsAndLosses" => crate::svc::charsheet::kills_where(ctx, |k, final_blow| {
+            k.int("victimCorpID") == Some(corp) || final_blow.and_then(|p| p.int("corporationID")) == Some(corp)
+        }),
         "GetInfoWindowDataForChar" => info_window_data_for_char(ctx, arg0.unwrap_or(0)).await,
         "GetTitles" => titles::get_titles(ctx).await,
         "UpdateTitle" => return titles::update_title(ctx, args).await.map_or_else(|e| e, Outcome::Value),
@@ -253,7 +264,7 @@ async fn corp_registry(ctx: &Ctx<'_>, method: &str, args: &[Value]) -> Outcome {
         "DeleteTitle" => return titles::delete_title(ctx, arg0.unwrap_or(0)).await.map_or_else(|e| e, Outcome::Value),
         // The stations holding items locked down by a corporation vote.
         "GetLockedItemLocations" => crate::svc::votes::locked_locations(ctx).await,
-        "GetMemberIDsWithMoreThanAvgShares" => Value::List(Vec::new()),
+        "GetMemberIDsWithMoreThanAvgShares" => shares::members_above_average(ctx, corp).await,
 
         "GetMembers" => members_rowset(ctx, corp).await,
         "GetOffices" => views::offices(ctx).await,
@@ -536,21 +547,6 @@ fn role_groups() -> Value {
     rowset(ROLE_GROUP_HEADER, lines)
 }
 
-async fn shares_by_shareholder(ctx: &Ctx<'_>, corp_shares: bool) -> Value {
-    const HEADER: &[&str] = &["corporationID", "shares"];
-    if corp_shares {
-        return rowset(HEADER, Vec::new());
-    }
-    let Some(char_id) = ctx.session.char_id else { return rowset(HEADER, Vec::new()) };
-    let lines = ctx.store.read(|db| {
-        db.table("crpCharShares")
-            .find(&["characterID"], &[store::Value::Int(char_id)])
-            .map(|r| Value::List(r.line(&["corporationID", "shares"])))
-            .collect()
-    });
-    rowset(HEADER, lines)
-}
-
 async fn info_window_data_for_char(ctx: &Ctx<'_>, char_id: i64) -> Value {
     const HEADER: &[&str] = &[
         "corpID", "allianceID", "title", "title1", "title2", "title3", "title4", "title5",
@@ -708,6 +704,7 @@ async fn corp_station_mgr(
         "SetCloneTypeID" => return crate::svc::medical::set_clone_type(ctx, arg0.unwrap_or(0)).await,
         "SetHomeStation" => return crate::svc::medical::set_home_station(ctx, arg0.unwrap_or(0)).await,
         "RentOffice" => return offices::rent(ctx,station,args).await,
+        "MoveCorpHQHere" => return details::move_hq_here(ctx, station).await.map_or_else(|e| e, Outcome::Value),
 
         _ => return Outcome::Unknown(format!("corpStationMgr::{method}")),
     };

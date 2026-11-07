@@ -99,17 +99,28 @@ pub async fn character(call: &Call, ctx: &Ctx<'_>) -> Option<Outcome> {
 /// Trinity's combat log reads these fields directly, including the XML used
 /// by util.CombatLog_CopyText. Older rows have no recoverable item-loss detail.
 fn recent_kills(ctx: &Ctx<'_>) -> Value {
+    let Some(me) = ctx.session.char_id else { return kills_where(ctx, |_, _| false) };
+    kills_where(ctx, |k, _| k.int("victimCharID") == Some(me) || k.int("finalBlowID") == Some(me))
+}
+
+/// The latest hundred kills `keep(kill, final blow participant)` accepts, as
+/// the combat log rows above; corpRegistry.GetRecentKillsAndLosses uses it
+/// for a corporation (bco_wars.py:23-44).
+pub(crate) fn kills_where(ctx: &Ctx<'_>, keep: impl Fn(&Row, Option<Row>) -> bool) -> Value {
     const HEADER: &[&str] = &["killID","killTime","solarSystemID","moonID","victimCharacterID",
         "victimCorporationID","victimAllianceID","victimShipTypeID","victimDamageTaken",
         "finalCharacterID","finalCorporationID","finalAllianceID","finalShipTypeID",
         "finalWeaponTypeID","finalDamageDone","finalSecurityStatus","killBlob"];
-    let Some(me) = ctx.session.char_id else { return rowset(HEADER, Vec::new()) };
     ctx.store.read(|db| {
         let participants = db.table("killLogParticipants");
         let mut found: Vec<Row> = db
             .table("killLog")
             .rows()
-            .filter(|k| k.int("victimCharID") == Some(me) || k.int("finalBlowID") == Some(me))
+            .filter(|k| {
+                let kill = k.int("killID").unwrap_or(0);
+                let final_blow = k.int("finalBlowID").and_then(|id| participants.get(&[Cell::Int(kill), Cell::Int(id)]));
+                keep(k, final_blow)
+            })
             .collect();
         found.sort_by(|a, b| (b.int("killTime"), b.int("killID")).cmp(&(a.int("killTime"), a.int("killID"))));
         found.truncate(100);
